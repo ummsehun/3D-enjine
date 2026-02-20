@@ -103,6 +103,19 @@ pub enum TextureSamplingMode {
     Bilinear,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClarityProfile {
+    Balanced,
+    Sharp,
+    Extreme,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnsiQuantization {
+    Q216,
+    Off,
+}
+
 #[derive(Debug, Clone)]
 pub struct RenderConfig {
     pub fov_deg: f32,
@@ -113,6 +126,7 @@ pub struct RenderConfig {
     pub detail_profile: DetailProfile,
     pub backend: RenderBackend,
     pub color_mode: ColorMode,
+    pub ascii_force_color: bool,
     pub braille_profile: BrailleProfile,
     pub theme_style: ThemeStyle,
     pub audio_reactive: AudioReactiveMode,
@@ -127,6 +141,11 @@ pub struct RenderConfig {
     pub stage_reactive: bool,
     pub material_color: bool,
     pub texture_sampling: TextureSamplingMode,
+    pub clarity_profile: ClarityProfile,
+    pub ansi_quantization: AnsiQuantization,
+    pub model_lift: f32,
+    pub edge_accent_strength: f32,
+    pub bg_suppression: f32,
     pub braille_aspect_compensation: f32,
     pub charset: String,
     pub cell_aspect: f32,
@@ -159,6 +178,7 @@ impl Default for RenderConfig {
             detail_profile: DetailProfile::Balanced,
             backend: RenderBackend::Cpu,
             color_mode: ColorMode::Mono,
+            ascii_force_color: true,
             braille_profile: BrailleProfile::Safe,
             theme_style: ThemeStyle::Theater,
             audio_reactive: AudioReactiveMode::On,
@@ -173,7 +193,12 @@ impl Default for RenderConfig {
             stage_reactive: true,
             material_color: true,
             texture_sampling: TextureSamplingMode::Nearest,
-            braille_aspect_compensation: 0.90,
+            clarity_profile: ClarityProfile::Sharp,
+            ansi_quantization: AnsiQuantization::Q216,
+            model_lift: 0.12,
+            edge_accent_strength: 0.32,
+            bg_suppression: 0.35,
+            braille_aspect_compensation: 1.00,
             charset: DEFAULT_CHARSET.to_owned(),
             cell_aspect: 0.5,
             cell_aspect_mode: CellAspectMode::Auto,

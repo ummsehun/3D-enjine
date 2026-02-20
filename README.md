@@ -21,7 +21,9 @@ CPU-first terminal renderer for 3D meshes/animations (ASCII/Braille) with option
 - 오디오 에너지 반응(밝기/배경/카메라 미세 펄스)
 - 자동 시네마틱 카메라(전신/상반신/근접 전환)
 - 동적 품질 제어(`balanced/cinematic/smooth`) + LOD 자동 조정
-- 터미널 과대 해상도 보호(내부 렌더 상한 600x180)
+- 터미널 과대 해상도 보호(내부 렌더 상한 4096x2048)
+- `assets/stage/{dir}` 스캔 + 상태 분류(`사용 가능`/`PMX 변환 필요`/`사용 불가`)
+- `stage.meta.toml` 기반 스테이지 transform(offset/scale/rotation) 적용
 - `gpu`(macOS + feature build) 실험 경로 + 미지원 환경 CPU fallback
 
 ## Commands
@@ -30,11 +32,14 @@ CPU-first terminal renderer for 3D meshes/animations (ASCII/Braille) with option
 cargo start
 cargo start-dev
 cargo start --dir assets/glb --music-dir assets/music
+cargo start --stage-dir assets/stage --stage auto
+cargo start --stage "MyStageDir" --clarity-profile sharp --ansi-quantization off --model-lift 0.14
+cargo start --mode ascii --color-mode mono --ascii-force-color on --ansi-quantization off
 cargo start --sync-offset-ms 120 --sync-speed-mode auto --cell-aspect-mode auto
 cargo start --mode braille --color-mode ansi --braille-profile safe --theme theater --audio-reactive on --cinematic-camera on --reactive-gain 0.35 --perf-profile balanced --detail-profile ultra --center-lock-mode root --camera-focus auto --material-color on --texture-sampling nearest --backend cpu
 cargo run -- run --scene cube --mode ascii --fps-cap 30
 cargo run -- run --scene glb --glb /path/to/model.glb --fps-cap 0
-cargo run -- run --scene glb --glb /path/to/model.glb --anim 0 --mode ascii --fps-cap 30 --cell-aspect 0.5 --cell-aspect-mode auto
+cargo run -- run --scene glb --glb /path/to/model.glb --anim 0 --mode ascii --fps-cap 30 --cell-aspect 0.5 --cell-aspect-mode auto --stage-dir assets/stage --stage auto
 cargo run --features gpu -- run --scene glb --glb /path/to/model.glb --mode braille --color-mode ansi --braille-profile normal --theme neon --perf-profile smooth --backend gpu
 cargo run -- run --scene obj --obj /path/to/model.obj --mode ascii --fps-cap 30
 cargo run -- inspect --glb /path/to/model.glb
@@ -46,13 +51,14 @@ cargo run -- bench --scene glb-anim --glb /path/to/model.glb --anim 0 --seconds 
 
 ## Start Wizard (Ratatui)
 
-`cargo start`는 `assets/glb` + `assets/music`를 스캔하고 5단계 위저드를 엽니다.
+`cargo start`는 `assets/glb` + `assets/music` + `assets/stage`를 스캔하고 6단계 위저드를 엽니다.
 
 1. 모델 선택
 2. 음악 선택 (`없음` 포함)
-3. 렌더 옵션 (`모드`, `성능/디테일 프로필`, `백엔드`, `중앙 고정/기준`, `카메라 포커스`, `재질색상/텍스처 샘플링`, `스테이지 레벨`, `FPS`, `대비`, `동기화`, `비율 모드`, `폰트 프리셋`)
-4. 비율 캘리브레이션 (원형 프리뷰 + trim 조절)
-5. 확인/실행 (감지/적용 비율, clip/audio 길이, speed factor 표시)
+3. 스테이지 선택 (`스테이지를 선택해 주세요`, 상태 배지 표시)
+4. 렌더 옵션 (`모드`, `성능/디테일/선명도 프로필`, `ANSI 양자화`, `백엔드`, `중앙 고정/기준`, `카메라 포커스`, `재질색상/텍스처 샘플링`, `model_lift`, `edge_accent`, `스테이지 레벨`, `FPS`, `대비`, `동기화`, `비율 모드`, `폰트 프리셋`)
+5. 비율 캘리브레이션 (원형 프리뷰 + trim 조절)
+6. 확인/실행 (모델/음악/스테이지 상태, 감지/적용 비율, clip/audio 길이, speed factor 표시)
 
 공통 키:
 
@@ -81,6 +87,7 @@ cargo run -- bench --scene glb-anim --glb /path/to/model.glb --anim 0 --seconds 
 - `cell_aspect_trim = 0.70..1.30`
 - `contrast_profile = adaptive|fixed`
 - `color_mode = mono|ansi`
+- `ascii_force_color = true|false` (ASCII 모드에서 ANSI 컬러 강제)
 - `braille_profile = safe|normal|dense`
 - `theme = theater|neon|holo`
 - `audio_reactive = off|on|high`
@@ -89,6 +96,10 @@ cargo run -- bench --scene glb-anim --glb /path/to/model.glb --anim 0 --seconds 
 - `perf_profile = balanced|cinematic|smooth`
 - `detail_profile = perf|balanced|ultra`
 - `backend = cpu|gpu` (`gpu-preview`도 레거시 alias로 인식)
+- `clarity_profile = balanced|sharp|extreme`
+- `ansi_quantization = q216|off`
+- `stage_dir = assets/stage`
+- `stage_selection = auto|none|<stage-name>|<path>`
 - `exposure_bias = -0.5..0.8`
 - `center_lock = true|false`
 - `center_lock_mode = root|mixed`
@@ -96,6 +107,9 @@ cargo run -- bench --scene glb-anim --glb /path/to/model.glb --anim 0 --seconds 
 - `material_color = true|false`
 - `texture_sampling = nearest|bilinear`
 - `braille_aspect_compensation = 0.70..1.30`
+- `model_lift = 0.02..0.45`
+- `edge_accent_strength = 0.0..1.5`
+- `bg_suppression = 0.0..1.0`
 - `stage_level = 0..4`
 - `stage_reactive = true|false`
 - `sync_offset_ms = -5000..5000`
@@ -125,6 +139,7 @@ contrast_profile = adaptive
 sync_offset_ms = 0
 sync_speed_mode = auto
 color_mode = ansi
+ascii_force_color = true
 braille_profile = safe
 theme = theater
 audio_reactive = on
@@ -132,14 +147,21 @@ cinematic_camera = on
 reactive_gain = 0.35
 perf_profile = balanced
 detail_profile = balanced
+clarity_profile = sharp
+ansi_quantization = q216
 backend = cpu
+stage_dir = assets/stage
+stage_selection = auto
 exposure_bias = 0.00
 center_lock = true
 center_lock_mode = root
 camera_focus = auto
 material_color = true
 texture_sampling = nearest
-braille_aspect_compensation = 0.90
+braille_aspect_compensation = 1.00
+model_lift = 0.12
+edge_accent_strength = 0.32
+bg_suppression = 0.35
 stage_level = 2
 stage_reactive = true
 triangle_stride = 2
@@ -151,6 +173,8 @@ min_triangle_area_px2 = 0.08
 - `start`에서 선택한 음악은 `rodio`로 루프 재생됩니다.
 - 기본 동기화는 `sync_speed_mode=auto`일 때 `clip_duration / audio_duration` 계수로 애니메이션 시간을 자동 보정합니다.
 - 오디오 초기화 실패 시 렌더링은 계속 진행되며 무음으로 동작합니다.
+- 시작 위저드에서 스테이지를 선택할 수 있으며, `PMX 변환 필요` 항목은 실행 시 차단 + 변환 안내를 출력합니다.
+- PMX 스테이지는 런타임에서 직접 로드하지 않습니다. Blender + MMD Tools로 GLB로 변환한 뒤 같은 `{dir}`에 두면 `사용 가능`으로 자동 전환됩니다.
 
 ## Runtime Controls
 
@@ -167,7 +191,7 @@ min_triangle_area_px2 = 0.08
 - `,` / `.` / `/`: sync offset -10ms / +10ms / 0ms
 - `v`: contrast preset cycle (`adaptive-low -> adaptive-normal -> adaptive-high -> fixed`)
 - `b`: braille profile cycle (`safe -> normal -> dense`)
-- `n`: color mode toggle (`mono <-> ansi`)
+- `n`: color mode toggle (`mono <-> ansi`, 단 ASCII 강제 컬러일 때는 ANSI 고정)
 - `p`: cinematic camera toggle (`off <-> on`)
 - `g` / `G`: reactive gain -/+ (`0.0..1.0`)
 
@@ -179,7 +203,7 @@ min_triangle_area_px2 = 0.08
 
 - `-` 연타로 저가시성이 지속되면 watchdog이 자동 복구(FullBody + framing reset + exposure 보정)
 - `center_lock=on`일 때 pan 키(`i/j/k/l/u/m`, 화살표)는 비활성화
-- 출력 I/O 실패가 누적되면 `mono + full fallback` 모드로 자동 전환
+- 출력 I/O 실패가 누적되면 `ansi-truecolor -> ansi-q216 -> mono/full` 순서로 자동 폴백
 
 ## Asset Policy
 

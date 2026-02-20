@@ -1,9 +1,12 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use crate::scene::{
-    AudioReactiveMode, BrailleProfile, CameraFocusMode, CellAspectMode, CenterLockMode,
-    CinematicCameraMode, ColorMode, ContrastProfile, DetailProfile, PerfProfile, RenderBackend,
-    SyncSpeedMode, TextureSamplingMode, ThemeStyle,
+    AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraFocusMode, CellAspectMode,
+    CenterLockMode, CinematicCameraMode, ClarityProfile, ColorMode, ContrastProfile, DetailProfile,
+    PerfProfile, RenderBackend, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,12 +15,13 @@ pub enum UiLanguage {
     En,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct GasciiConfig {
     pub ui_language: UiLanguage,
     pub font_preset_steps: i32,
     pub font_preset_enabled: bool,
     pub color_mode: Option<ColorMode>,
+    pub ascii_force_color: bool,
     pub braille_profile: BrailleProfile,
     pub theme_style: ThemeStyle,
     pub audio_reactive: AudioReactiveMode,
@@ -25,7 +29,11 @@ pub struct GasciiConfig {
     pub reactive_gain: f32,
     pub perf_profile: PerfProfile,
     pub detail_profile: DetailProfile,
+    pub clarity_profile: ClarityProfile,
+    pub ansi_quantization: AnsiQuantization,
     pub backend: RenderBackend,
+    pub stage_dir: PathBuf,
+    pub stage_selection: String,
     pub exposure_bias: f32,
     pub center_lock: bool,
     pub center_lock_mode: CenterLockMode,
@@ -33,6 +41,9 @@ pub struct GasciiConfig {
     pub material_color: bool,
     pub texture_sampling: TextureSamplingMode,
     pub braille_aspect_compensation: f32,
+    pub model_lift: f32,
+    pub edge_accent_strength: f32,
+    pub bg_suppression: f32,
     pub stage_level: u8,
     pub stage_reactive: bool,
     pub cell_aspect_mode: CellAspectMode,
@@ -51,6 +62,7 @@ impl Default for GasciiConfig {
             font_preset_steps: 0,
             font_preset_enabled: false,
             color_mode: None,
+            ascii_force_color: true,
             braille_profile: BrailleProfile::Safe,
             theme_style: ThemeStyle::Theater,
             audio_reactive: AudioReactiveMode::On,
@@ -58,14 +70,21 @@ impl Default for GasciiConfig {
             reactive_gain: 0.35,
             perf_profile: PerfProfile::Balanced,
             detail_profile: DetailProfile::Balanced,
+            clarity_profile: ClarityProfile::Sharp,
+            ansi_quantization: AnsiQuantization::Q216,
             backend: RenderBackend::Cpu,
+            stage_dir: PathBuf::from("assets/stage"),
+            stage_selection: "auto".to_owned(),
             exposure_bias: 0.0,
             center_lock: true,
             center_lock_mode: CenterLockMode::Root,
             camera_focus: CameraFocusMode::Auto,
             material_color: true,
             texture_sampling: TextureSamplingMode::Nearest,
-            braille_aspect_compensation: 0.90,
+            braille_aspect_compensation: 1.00,
+            model_lift: 0.12,
+            edge_accent_strength: 0.32,
+            bg_suppression: 0.35,
             stage_level: 2,
             stage_reactive: true,
             cell_aspect_mode: CellAspectMode::Auto,
@@ -179,6 +198,11 @@ pub fn load_gascii_config(path: &Path) -> GasciiConfig {
                     ColorMode::Mono
                 });
             }
+            "ascii_force_color" => {
+                if let Some(parsed) = parse_bool(value) {
+                    cfg.ascii_force_color = parsed;
+                }
+            }
             "braille_profile" => {
                 let lower = value.to_ascii_lowercase();
                 cfg.braille_profile = if lower.starts_with("den") {
@@ -244,6 +268,24 @@ pub fn load_gascii_config(path: &Path) -> GasciiConfig {
                     DetailProfile::Balanced
                 };
             }
+            "clarity_profile" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.clarity_profile = if lower.starts_with("ext") {
+                    ClarityProfile::Extreme
+                } else if lower.starts_with("bal") {
+                    ClarityProfile::Balanced
+                } else {
+                    ClarityProfile::Sharp
+                };
+            }
+            "ansi_quantization" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.ansi_quantization = if lower == "off" || lower == "false" || lower == "0" {
+                    AnsiQuantization::Off
+                } else {
+                    AnsiQuantization::Q216
+                };
+            }
             "backend" | "render_backend" => {
                 let lower = value.to_ascii_lowercase();
                 cfg.backend = if lower.starts_with("gpu") {
@@ -254,6 +296,18 @@ pub fn load_gascii_config(path: &Path) -> GasciiConfig {
                 } else {
                     RenderBackend::Cpu
                 };
+            }
+            "stage_dir" => {
+                let raw = value.trim().trim_matches('"').trim_matches('\'');
+                if !raw.is_empty() {
+                    cfg.stage_dir = PathBuf::from(raw);
+                }
+            }
+            "stage_selection" | "stage" => {
+                let raw = value.trim().trim_matches('"').trim_matches('\'');
+                if !raw.is_empty() {
+                    cfg.stage_selection = raw.to_owned();
+                }
             }
             "exposure_bias" => {
                 if let Ok(parsed) = value.parse::<f32>() {
@@ -305,6 +359,21 @@ pub fn load_gascii_config(path: &Path) -> GasciiConfig {
                     cfg.braille_aspect_compensation = parsed.clamp(0.70, 1.30);
                 }
             }
+            "model_lift" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    cfg.model_lift = parsed.clamp(0.02, 0.45);
+                }
+            }
+            "edge_accent_strength" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    cfg.edge_accent_strength = parsed.clamp(0.0, 1.5);
+                }
+            }
+            "bg_suppression" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    cfg.bg_suppression = parsed.clamp(0.0, 1.0);
+                }
+            }
             "stage_level" => {
                 if let Ok(parsed) = value.parse::<u8>() {
                     cfg.stage_level = parsed.min(4);
@@ -340,6 +409,7 @@ mod tests {
         assert_eq!(cfg.font_preset_steps, 0);
         assert!(!cfg.font_preset_enabled);
         assert_eq!(cfg.color_mode, None);
+        assert!(cfg.ascii_force_color);
         assert_eq!(cfg.braille_profile, BrailleProfile::Safe);
         assert_eq!(cfg.theme_style, ThemeStyle::Theater);
         assert_eq!(cfg.audio_reactive, AudioReactiveMode::On);
@@ -347,14 +417,21 @@ mod tests {
         assert!((cfg.reactive_gain - 0.35).abs() < 1e-6);
         assert_eq!(cfg.perf_profile, PerfProfile::Balanced);
         assert_eq!(cfg.detail_profile, DetailProfile::Balanced);
+        assert_eq!(cfg.clarity_profile, ClarityProfile::Sharp);
+        assert_eq!(cfg.ansi_quantization, AnsiQuantization::Q216);
         assert_eq!(cfg.backend, RenderBackend::Cpu);
+        assert_eq!(cfg.stage_dir, PathBuf::from("assets/stage"));
+        assert_eq!(cfg.stage_selection, "auto");
         assert!((cfg.exposure_bias - 0.0).abs() < 1e-6);
         assert!(cfg.center_lock);
         assert_eq!(cfg.center_lock_mode, CenterLockMode::Root);
         assert_eq!(cfg.camera_focus, CameraFocusMode::Auto);
         assert!(cfg.material_color);
         assert_eq!(cfg.texture_sampling, TextureSamplingMode::Nearest);
-        assert!((cfg.braille_aspect_compensation - 0.90).abs() < 1e-6);
+        assert!((cfg.braille_aspect_compensation - 1.00).abs() < 1e-6);
+        assert!((cfg.model_lift - 0.12).abs() < 1e-6);
+        assert!((cfg.edge_accent_strength - 0.32).abs() < 1e-6);
+        assert!((cfg.bg_suppression - 0.35).abs() < 1e-6);
         assert_eq!(cfg.stage_level, 2);
         assert!(cfg.stage_reactive);
         assert_eq!(cfg.cell_aspect_mode, CellAspectMode::Auto);
@@ -411,12 +488,13 @@ mod tests {
         let path = dir.path().join("Gascii.config");
         fs::write(
             &path,
-            "cell_aspect_mode = manual\ncell_aspect_trim = 1.15\ncontrast_profile = fixed\nsync_offset_ms = -120\nsync_speed_mode = realtime\ncolor_mode=ansi\nbraille_profile=normal\ntheme=holo\naudio_reactive=high\ncinematic_camera=aggressive\nreactive_gain=0.42\nperf_profile=smooth\ndetail_profile=ultra\nbackend=gpu-preview\nexposure_bias=0.18\ncenter_lock=false\ncenter_lock_mode=mixed\ncamera_focus=face\nmaterial_color=off\ntexture_sampling=bilinear\nbraille_aspect_compensation=1.12\nstage_level=4\nstage_reactive=off\n",
+            "cell_aspect_mode = manual\ncell_aspect_trim = 1.15\ncontrast_profile = fixed\nsync_offset_ms = -120\nsync_speed_mode = realtime\ncolor_mode=ansi\nascii_force_color=false\nbraille_profile=normal\ntheme=holo\naudio_reactive=high\ncinematic_camera=aggressive\nreactive_gain=0.42\nperf_profile=smooth\ndetail_profile=ultra\nclarity_profile=extreme\nansi_quantization=off\nbackend=gpu-preview\nstage_dir=assets/stage\nstage_selection=world is mine\nexposure_bias=0.18\ncenter_lock=false\ncenter_lock_mode=mixed\ncamera_focus=face\nmaterial_color=off\ntexture_sampling=bilinear\nbraille_aspect_compensation=1.12\nmodel_lift=0.2\nedge_accent_strength=0.5\nbg_suppression=0.42\nstage_level=4\nstage_reactive=off\n",
         )
         .expect("write config");
 
         let cfg = load_gascii_config(&path);
         assert_eq!(cfg.color_mode, Some(ColorMode::Ansi));
+        assert!(!cfg.ascii_force_color);
         assert_eq!(cfg.braille_profile, BrailleProfile::Normal);
         assert_eq!(cfg.theme_style, ThemeStyle::Holo);
         assert_eq!(cfg.audio_reactive, AudioReactiveMode::High);
@@ -424,7 +502,11 @@ mod tests {
         assert!((cfg.reactive_gain - 0.42).abs() < 1e-6);
         assert_eq!(cfg.perf_profile, PerfProfile::Smooth);
         assert_eq!(cfg.detail_profile, DetailProfile::Ultra);
+        assert_eq!(cfg.clarity_profile, ClarityProfile::Extreme);
+        assert_eq!(cfg.ansi_quantization, AnsiQuantization::Off);
         assert_eq!(cfg.backend, RenderBackend::Gpu);
+        assert_eq!(cfg.stage_dir, PathBuf::from("assets/stage"));
+        assert_eq!(cfg.stage_selection, "world is mine");
         assert!((cfg.exposure_bias - 0.18).abs() < 1e-6);
         assert!(!cfg.center_lock);
         assert_eq!(cfg.center_lock_mode, CenterLockMode::Mixed);
@@ -432,6 +514,9 @@ mod tests {
         assert!(!cfg.material_color);
         assert_eq!(cfg.texture_sampling, TextureSamplingMode::Bilinear);
         assert!((cfg.braille_aspect_compensation - 1.12).abs() < 1e-6);
+        assert!((cfg.model_lift - 0.2).abs() < 1e-6);
+        assert!((cfg.edge_accent_strength - 0.5).abs() < 1e-6);
+        assert!((cfg.bg_suppression - 0.42).abs() < 1e-6);
         assert_eq!(cfg.stage_level, 4);
         assert!(!cfg.stage_reactive);
         assert_eq!(cfg.cell_aspect_mode, CellAspectMode::Manual);

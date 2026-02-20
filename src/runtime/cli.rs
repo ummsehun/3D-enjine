@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::scene::{
-    AudioReactiveMode, BrailleProfile, CameraFocusMode, CellAspectMode, CenterLockMode,
-    CinematicCameraMode, ColorMode, ContrastProfile, DEFAULT_CHARSET, DetailProfile, PerfProfile,
-    RenderBackend, RenderMode, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
+    AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraFocusMode, CellAspectMode,
+    CenterLockMode, CinematicCameraMode, ClarityProfile, ColorMode, ContrastProfile,
+    DEFAULT_CHARSET, DetailProfile, PerfProfile, RenderBackend, RenderMode, SyncSpeedMode,
+    TextureSamplingMode, ThemeStyle,
 };
 
 #[derive(Debug, Parser)]
@@ -39,13 +40,21 @@ pub struct StartArgs {
     /// Directory to scan for .mp3/.wav files.
     #[arg(long, default_value = "assets/music")]
     pub music_dir: PathBuf,
+    /// Directory to scan for stage directories.
+    #[arg(long, default_value = "assets/stage")]
+    pub stage_dir: PathBuf,
+    /// Stage selector: none | auto | <stage-name> | <path>
+    #[arg(long)]
+    pub stage: Option<String>,
     /// Animation selector by name or index. Defaults to first clip if available.
     #[arg(long)]
     pub anim: Option<String>,
-    #[arg(long, value_enum, default_value_t = ModeArg::Ascii)]
+    #[arg(long, value_enum, default_value_t = ModeArg::Braille)]
     pub mode: ModeArg,
     #[arg(long, value_enum)]
     pub color_mode: Option<ColorModeArg>,
+    #[arg(long, value_enum)]
+    pub ascii_force_color: Option<ToggleArg>,
     #[arg(long, value_enum)]
     pub braille_profile: Option<BrailleProfileArg>,
     #[arg(long, value_enum)]
@@ -60,6 +69,10 @@ pub struct StartArgs {
     pub perf_profile: Option<PerfProfileArg>,
     #[arg(long, value_enum)]
     pub detail_profile: Option<DetailProfileArg>,
+    #[arg(long, value_enum)]
+    pub clarity_profile: Option<ClarityProfileArg>,
+    #[arg(long, value_enum)]
+    pub ansi_quantization: Option<AnsiQuantizationArg>,
     #[arg(long, value_enum)]
     pub backend: Option<BackendArg>,
     #[arg(long, value_enum)]
@@ -76,7 +89,11 @@ pub struct StartArgs {
     pub stage_level: Option<u8>,
     #[arg(long)]
     pub exposure_bias: Option<f32>,
-    #[arg(long, default_value_t = 30)]
+    #[arg(long)]
+    pub model_lift: Option<f32>,
+    #[arg(long)]
+    pub edge_accent_strength: Option<f32>,
+    #[arg(long, default_value_t = 20)]
     pub fps_cap: u32,
     #[arg(long, default_value_t = 0.5)]
     pub cell_aspect: f32,
@@ -132,13 +149,21 @@ pub struct RunArgs {
     /// Path to .obj file (required for --scene obj).
     #[arg(long)]
     pub obj: Option<PathBuf>,
+    /// Directory to scan for stage directories.
+    #[arg(long, default_value = "assets/stage")]
+    pub stage_dir: PathBuf,
+    /// Stage selector: none | auto | <stage-name> | <path>
+    #[arg(long)]
+    pub stage: Option<String>,
     /// Animation selector by name or index.
     #[arg(long)]
     pub anim: Option<String>,
-    #[arg(long, value_enum, default_value_t = ModeArg::Ascii)]
+    #[arg(long, value_enum, default_value_t = ModeArg::Braille)]
     pub mode: ModeArg,
     #[arg(long, value_enum)]
     pub color_mode: Option<ColorModeArg>,
+    #[arg(long, value_enum)]
+    pub ascii_force_color: Option<ToggleArg>,
     #[arg(long, value_enum)]
     pub braille_profile: Option<BrailleProfileArg>,
     #[arg(long, value_enum)]
@@ -153,6 +178,10 @@ pub struct RunArgs {
     pub perf_profile: Option<PerfProfileArg>,
     #[arg(long, value_enum)]
     pub detail_profile: Option<DetailProfileArg>,
+    #[arg(long, value_enum)]
+    pub clarity_profile: Option<ClarityProfileArg>,
+    #[arg(long, value_enum)]
+    pub ansi_quantization: Option<AnsiQuantizationArg>,
     #[arg(long, value_enum)]
     pub backend: Option<BackendArg>,
     #[arg(long, value_enum)]
@@ -169,7 +198,11 @@ pub struct RunArgs {
     pub stage_level: Option<u8>,
     #[arg(long)]
     pub exposure_bias: Option<f32>,
-    #[arg(long, default_value_t = 30)]
+    #[arg(long)]
+    pub model_lift: Option<f32>,
+    #[arg(long)]
+    pub edge_accent_strength: Option<f32>,
+    #[arg(long, default_value_t = 20)]
     pub fps_cap: u32,
     #[arg(long, default_value_t = 0.5)]
     pub cell_aspect: f32,
@@ -232,6 +265,8 @@ pub struct BenchArgs {
     #[arg(long, value_enum)]
     pub color_mode: Option<ColorModeArg>,
     #[arg(long, value_enum)]
+    pub ascii_force_color: Option<ToggleArg>,
+    #[arg(long, value_enum)]
     pub braille_profile: Option<BrailleProfileArg>,
     #[arg(long, value_enum)]
     pub theme: Option<ThemeArg>,
@@ -245,6 +280,10 @@ pub struct BenchArgs {
     pub perf_profile: Option<PerfProfileArg>,
     #[arg(long, value_enum)]
     pub detail_profile: Option<DetailProfileArg>,
+    #[arg(long, value_enum)]
+    pub clarity_profile: Option<ClarityProfileArg>,
+    #[arg(long, value_enum)]
+    pub ansi_quantization: Option<AnsiQuantizationArg>,
     #[arg(long, value_enum)]
     pub backend: Option<BackendArg>,
     #[arg(long, value_enum)]
@@ -261,6 +300,10 @@ pub struct BenchArgs {
     pub stage_level: Option<u8>,
     #[arg(long)]
     pub exposure_bias: Option<f32>,
+    #[arg(long)]
+    pub model_lift: Option<f32>,
+    #[arg(long)]
+    pub edge_accent_strength: Option<f32>,
     #[arg(long, default_value_t = 0.5)]
     pub cell_aspect: f32,
     #[arg(long, value_enum)]
@@ -392,6 +435,19 @@ pub enum DetailProfileArg {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ClarityProfileArg {
+    Balanced,
+    Sharp,
+    Extreme,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum AnsiQuantizationArg {
+    Q216,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum CenterLockModeArg {
     Root,
     Mixed,
@@ -506,6 +562,25 @@ impl From<DetailProfileArg> for DetailProfile {
             DetailProfileArg::Perf => DetailProfile::Perf,
             DetailProfileArg::Balanced => DetailProfile::Balanced,
             DetailProfileArg::Ultra => DetailProfile::Ultra,
+        }
+    }
+}
+
+impl From<ClarityProfileArg> for ClarityProfile {
+    fn from(value: ClarityProfileArg) -> Self {
+        match value {
+            ClarityProfileArg::Balanced => ClarityProfile::Balanced,
+            ClarityProfileArg::Sharp => ClarityProfile::Sharp,
+            ClarityProfileArg::Extreme => ClarityProfile::Extreme,
+        }
+    }
+}
+
+impl From<AnsiQuantizationArg> for AnsiQuantization {
+    fn from(value: AnsiQuantizationArg) -> Self {
+        match value {
+            AnsiQuantizationArg::Q216 => AnsiQuantization::Q216,
+            AnsiQuantizationArg::Off => AnsiQuantization::Off,
         }
     }
 }

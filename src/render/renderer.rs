@@ -3,8 +3,8 @@ use std::fmt::Write as _;
 
 use crate::math::{depth_less, perspective_matrix};
 use crate::scene::{
-    BrailleProfile, ColorMode, ContrastProfile, DEFAULT_CHARSET, DetailProfile, MeshCpu,
-    RenderConfig, RenderMode, SceneCpu, TextureSamplingMode, ThemeStyle,
+    AnsiQuantization, BrailleProfile, ClarityProfile, ColorMode, ContrastProfile, DEFAULT_CHARSET,
+    DetailProfile, MeshCpu, RenderConfig, RenderMode, SceneCpu, TextureSamplingMode, ThemeStyle,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -90,7 +90,7 @@ impl FrameBuffers {
         }
     }
 
-    pub fn write_ansi_text(&self, out: &mut String) {
+    pub fn write_ansi_text(&self, out: &mut String, quantization: AnsiQuantization) {
         if !self.has_color {
             self.write_text(out);
             return;
@@ -108,7 +108,7 @@ impl FrameBuffers {
             let row_end = row_start + width;
             let mut current_rgb: Option<[u8; 3]> = None;
             for idx in row_start..row_end {
-                let rgb = quantize_rgb16(self.fg_rgb[idx]);
+                let rgb = quantize_rgb(self.fg_rgb[idx], quantization);
                 if current_rgb != Some(rgb) {
                     push_fg_ansi(out, rgb);
                     current_rgb = Some(rgb);
@@ -127,39 +127,20 @@ fn push_fg_ansi(out: &mut String, rgb: [u8; 3]) {
     let _ = write!(out, "\x1b[38;2;{};{};{}m", rgb[0], rgb[1], rgb[2]);
 }
 
-fn quantize_rgb16(rgb: [u8; 3]) -> [u8; 3] {
-    const PALETTE_16: [[u8; 3]; 16] = [
-        [0, 0, 0],
-        [128, 0, 0],
-        [0, 128, 0],
-        [128, 128, 0],
-        [0, 0, 128],
-        [128, 0, 128],
-        [0, 128, 128],
-        [192, 192, 192],
-        [128, 128, 128],
-        [255, 0, 0],
-        [0, 255, 0],
-        [255, 255, 0],
-        [0, 0, 255],
-        [255, 0, 255],
-        [0, 255, 255],
-        [255, 255, 255],
-    ];
-
-    let mut best = PALETTE_16[0];
-    let mut best_dist = u32::MAX;
-    for candidate in PALETTE_16 {
-        let dr = rgb[0] as i32 - candidate[0] as i32;
-        let dg = rgb[1] as i32 - candidate[1] as i32;
-        let db = rgb[2] as i32 - candidate[2] as i32;
-        let dist = (dr * dr + dg * dg + db * db) as u32;
-        if dist < best_dist {
-            best_dist = dist;
-            best = candidate;
-        }
+fn quantize_rgb_q216(rgb: [u8; 3]) -> [u8; 3] {
+    // Keep ANSI runs compressible while preserving GLB texture/material colors.
+    fn q(c: u8) -> u8 {
+        let bucket = ((c as u16 * 5 + 127) / 255) as u8; // 0..5
+        bucket * 51
     }
-    best
+    [q(rgb[0]), q(rgb[1]), q(rgb[2])]
+}
+
+fn quantize_rgb(rgb: [u8; 3], quantization: AnsiQuantization) -> [u8; 3] {
+    match quantization {
+        AnsiQuantization::Q216 => quantize_rgb_q216(rgb),
+        AnsiQuantization::Off => rgb,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -303,6 +284,7 @@ fn fill_background_ascii(frame: &mut FrameBuffers, config: &RenderConfig, palett
     };
     let detail = background_detail_level(config);
     let stage = stage_params(config);
+    let bg_attenuation = (1.0 - config.bg_suppression.clamp(0.0, 1.0) * 0.75).clamp(0.05, 1.0);
     let pulse_scale = if matches!(config.color_mode, ColorMode::Ansi) {
         1.0
     } else if config.stage_reactive {
@@ -324,7 +306,7 @@ fn fill_background_ascii(frame: &mut FrameBuffers, config: &RenderConfig, palett
                 1 => ((0.015 + horizon * 0.05 + vignette * 0.03) * pulse_scale).clamp(0.0, 0.16),
                 _ => (0.010 + horizon * 0.025).clamp(0.0, 0.11),
             };
-            intensity *= stage.bg_luma_scale;
+            intensity *= stage.bg_luma_scale * bg_attenuation;
             if stage.floor_grid_density > 0
                 && y > (height * 2) / 3
                 && (x % stage.floor_grid_density == 0)
@@ -377,6 +359,7 @@ fn fill_background_braille(frame: &mut FrameBuffers, config: &RenderConfig, pale
     };
     let detail = background_detail_level(config);
     let stage = stage_params(config);
+    let bg_attenuation = (1.0 - config.bg_suppression.clamp(0.0, 1.0) * 0.75).clamp(0.05, 1.0);
     let pulse_scale = if matches!(config.color_mode, ColorMode::Ansi) {
         1.0
     } else if config.stage_reactive {
@@ -400,7 +383,7 @@ fn fill_background_braille(frame: &mut FrameBuffers, config: &RenderConfig, pale
                 1 => ((0.011 + horizon * 0.035) * pulse_scale).clamp(0.0, 0.12),
                 _ => (0.008 + horizon * 0.015).clamp(0.0, 0.08),
             };
-            base *= stage.bg_luma_scale;
+            base *= stage.bg_luma_scale * bg_attenuation;
             if stage.floor_grid_density > 0
                 && y > (height * 2) / 3
                 && (x % stage.floor_grid_density == 0)
@@ -604,6 +587,32 @@ fn to_display_rgb(rgb: [f32; 3]) -> [u8; 3] {
     ]
 }
 
+fn color_scale_from_tonemap(base_luma: f32, target_intensity: f32) -> f32 {
+    if base_luma <= 1e-4 {
+        target_intensity.max(0.12)
+    } else {
+        (target_intensity / base_luma).clamp(0.35, 3.1)
+    }
+}
+
+fn clarity_saturation_gain(clarity: ClarityProfile) -> f32 {
+    match clarity {
+        ClarityProfile::Balanced => 1.00,
+        ClarityProfile::Sharp => 1.08,
+        ClarityProfile::Extreme => 1.16,
+    }
+}
+
+fn boost_saturation(rgb: [f32; 3], saturation_gain: f32) -> [f32; 3] {
+    let sat = saturation_gain.clamp(0.6, 1.8);
+    let l = luminance(rgb);
+    [
+        (l + (rgb[0] - l) * sat).clamp(0.0, 1.0),
+        (l + (rgb[1] - l) * sat).clamp(0.0, 1.0),
+        (l + (rgb[2] - l) * sat).clamp(0.0, 1.0),
+    ]
+}
+
 fn project_root_screen(
     scene: &SceneCpu,
     global_matrices: &[Mat4],
@@ -687,6 +696,13 @@ impl RenderScratch {
         self.projected_vertices.clear();
         self.projected_vertices.resize(vertex_count, None);
         self.projected_vertices.as_mut_slice()
+    }
+
+    pub fn reset_exposure(&mut self) {
+        self.exposure = 1.0;
+        self.safe_low_visibility_streak = 0;
+        self.safe_high_visibility_streak = 0;
+        self.safe_boost_active = false;
     }
 }
 
@@ -824,6 +840,8 @@ fn render_frame_ascii(
         fog_strength: (config.fog_strength * stage.fog_mul).clamp(0.0, 1.0),
     };
     let mut stats = RenderStats::default();
+    let mut histogram = [0_u32; 64];
+    let mut histogram_count = 0_u32;
     if let Some((x, y, depth)) = project_root_screen(
         scene,
         global_matrices,
@@ -876,8 +894,16 @@ fn render_frame_ascii(
             contrast,
             palette,
             exposure,
+            &mut histogram,
+            &mut histogram_count,
         );
     }
+    update_exposure_from_histogram(
+        &mut scratch.exposure,
+        &histogram,
+        histogram_count,
+        config.clarity_profile,
+    );
     apply_visible_metrics(&mut stats, frame);
     stats
 }
@@ -907,7 +933,7 @@ fn render_frame_braille(
     let contrast = contrast_params(config, cells);
     let stage = stage_params(config);
     let aspect = ((sub_w as f32)
-        * (config.cell_aspect * 2.0 * config.braille_aspect_compensation.clamp(0.70, 1.30)))
+        * (config.cell_aspect * config.braille_aspect_compensation.clamp(0.70, 1.30)))
     .max(1.0)
         / (sub_h as f32);
     let projection = perspective_matrix(config.fov_deg, aspect, config.near, config.far);
@@ -941,7 +967,11 @@ fn render_frame_braille(
         stats.root_depth = Some(depth);
     }
     let exposure = scratch.exposure * exposure_bias_multiplier(config.exposure_bias);
-    let threshold = braille_thresholds(config.braille_profile, scratch.safe_boost_active);
+    let threshold = braille_thresholds(
+        config.braille_profile,
+        config.clarity_profile,
+        scratch.safe_boost_active,
+    );
     for (instance_index, instance) in scene.mesh_instances.iter().enumerate() {
         let Some(mesh) = scene.meshes.get(instance.mesh_index) else {
             continue;
@@ -991,7 +1021,7 @@ fn render_frame_braille(
         &mut scratch.exposure,
         &histogram,
         histogram_count,
-        config.braille_profile,
+        config.clarity_profile,
     );
     compose_braille_cells(
         frame,
@@ -1005,8 +1035,8 @@ fn render_frame_braille(
     stats
 }
 
-pub fn encode_ansi_frame(frame: &FrameBuffers, out: &mut String) {
-    frame.write_ansi_text(out);
+pub fn encode_ansi_frame(frame: &FrameBuffers, out: &mut String, quantization: AnsiQuantization) {
+    frame.write_ansi_text(out, quantization);
 }
 
 fn project_mesh_vertices(
@@ -1165,6 +1195,8 @@ fn rasterize_mesh(
     contrast: ContrastParams,
     palette: ThemePalette,
     exposure: f32,
+    histogram: &mut [u32; 64],
+    histogram_count: &mut u32,
 ) {
     let width = i32::from(frame.width);
     let height = i32::from(frame.height);
@@ -1279,20 +1311,32 @@ fn rasterize_mesh(
                     let albedo =
                         sample_material_albedo(scene, material_index, uv0, vertex_color, config);
                     let lighting = shade_lighting(world_normal, world_pos, shading).clamp(0.0, 1.0);
+                    let view_dir = (shading.camera_pos - world_pos).normalize_or_zero();
+                    let edge_factor = (1.0 - world_normal.dot(view_dir).abs()).powf(1.6);
                     let fog = depth.powf(1.7) * shading.fog_strength * contrast.fog_scale;
-                    let base_light = (lighting * (1.0 - fog.clamp(0.0, 1.0))).clamp(0.0, 1.0);
-                    let shaded_rgb = [
+                    let base_light = ((lighting
+                        + edge_factor * config.edge_accent_strength * 0.22)
+                        * (1.0 - fog.clamp(0.0, 1.0)))
+                    .clamp(0.0, 1.0);
+                    let mut shaded_rgb = [
                         albedo[0] * base_light,
                         albedo[1] * base_light,
                         albedo[2] * base_light,
                     ];
+                    if config.material_color {
+                        let sat_gain = clarity_saturation_gain(config.clarity_profile)
+                            + edge_factor * config.edge_accent_strength * 0.18;
+                        shaded_rgb = boost_saturation(shaded_rgb, sat_gain);
+                    }
                     let base = luminance(shaded_rgb);
-                    let intensity =
-                        tone_map_intensity(base, contrast.floor, contrast.gamma, exposure);
+                    push_histogram(histogram, histogram_count, base);
+                    let floor = contrast.floor.max(config.model_lift.clamp(0.02, 0.45));
+                    let intensity = tone_map_intensity(base, floor, contrast.gamma, exposure);
                     frame.glyphs[idx] = glyph_for_intensity(intensity, charset);
                     if matches!(config.color_mode, ColorMode::Ansi) {
                         frame.fg_rgb[idx] = if config.material_color {
-                            to_display_rgb(scale_rgb(shaded_rgb, intensity.max(0.15)))
+                            let color_scale = color_scale_from_tonemap(base, intensity);
+                            to_display_rgb(scale_rgb(shaded_rgb, color_scale))
                         } else {
                             model_color_for_intensity(intensity, palette)
                         };
@@ -1431,20 +1475,31 @@ fn rasterize_braille_mesh(
                     let albedo =
                         sample_material_albedo(scene, material_index, uv0, vertex_color, config);
                     let lighting = shade_lighting(world_normal, world_pos, shading).clamp(0.0, 1.0);
+                    let view_dir = (shading.camera_pos - world_pos).normalize_or_zero();
+                    let edge_factor = (1.0 - world_normal.dot(view_dir).abs()).powf(1.6);
                     let fog = depth.powf(1.7) * shading.fog_strength * contrast.fog_scale;
-                    let base_light = (lighting * (1.0 - fog.clamp(0.0, 1.0))).clamp(0.0, 1.0);
-                    let shaded_rgb = [
+                    let base_light = ((lighting
+                        + edge_factor * config.edge_accent_strength * 0.22)
+                        * (1.0 - fog.clamp(0.0, 1.0)))
+                    .clamp(0.0, 1.0);
+                    let mut shaded_rgb = [
                         albedo[0] * base_light,
                         albedo[1] * base_light,
                         albedo[2] * base_light,
                     ];
+                    if config.material_color {
+                        let sat_gain = clarity_saturation_gain(config.clarity_profile)
+                            + edge_factor * config.edge_accent_strength * 0.18;
+                        shaded_rgb = boost_saturation(shaded_rgb, sat_gain);
+                    }
                     let base = luminance(shaded_rgb);
                     push_histogram(histogram, histogram_count, base);
-                    let intensity =
-                        tone_map_intensity(base, threshold.floor, threshold.gamma, exposure);
+                    let floor = threshold.floor.max(config.model_lift.clamp(0.02, 0.45));
+                    let intensity = tone_map_intensity(base, floor, threshold.gamma, exposure);
                     subpixels.intensity[idx] = intensity;
                     subpixels.color_rgb[idx] = if config.material_color {
-                        to_display_rgb(scale_rgb(shaded_rgb, intensity.max(0.15)))
+                        let color_scale = color_scale_from_tonemap(base, intensity);
+                        to_display_rgb(scale_rgb(shaded_rgb, color_scale))
                     } else {
                         model_color_for_intensity(intensity, palette)
                     };
@@ -1466,11 +1521,20 @@ struct BrailleThresholds {
     gamma: f32,
 }
 
-fn braille_thresholds(profile: BrailleProfile, safe_boost: bool) -> BrailleThresholds {
+fn braille_thresholds(
+    profile: BrailleProfile,
+    clarity: ClarityProfile,
+    safe_boost: bool,
+) -> BrailleThresholds {
+    let clarity_delta = match clarity {
+        ClarityProfile::Balanced => 0.0,
+        ClarityProfile::Sharp => -0.01,
+        ClarityProfile::Extreme => -0.02,
+    };
     match profile {
         BrailleProfile::Safe => {
             let mut value = BrailleThresholds {
-                on_threshold: 0.10,
+                on_threshold: (0.10_f32 + clarity_delta).clamp(0.04, 0.20),
                 min_visible: 0.06,
                 floor: 0.14,
                 gamma: 0.82,
@@ -1483,13 +1547,13 @@ fn braille_thresholds(profile: BrailleProfile, safe_boost: bool) -> BrailleThres
             value
         }
         BrailleProfile::Normal => BrailleThresholds {
-            on_threshold: 0.13,
+            on_threshold: (0.13_f32 + clarity_delta).clamp(0.05, 0.24),
             min_visible: 0.09,
             floor: 0.10,
             gamma: 0.90,
         },
         BrailleProfile::Dense => BrailleThresholds {
-            on_threshold: 0.16,
+            on_threshold: (0.16_f32 + clarity_delta).clamp(0.06, 0.26),
             min_visible: 0.12,
             floor: 0.07,
             gamma: 0.98,
@@ -1637,19 +1701,19 @@ fn update_exposure_from_histogram(
     exposure: &mut f32,
     histogram: &[u32; 64],
     count: u32,
-    profile: BrailleProfile,
+    clarity: ClarityProfile,
 ) {
     if count == 0 {
         return;
     }
-    let p85 = percentile_from_histogram(histogram, count, 0.85).max(1e-3);
-    let desired_mid = match profile {
-        BrailleProfile::Safe => 0.70,
-        BrailleProfile::Normal => 0.72,
-        BrailleProfile::Dense => 0.75,
+    let p75 = percentile_from_histogram(histogram, count, 0.75).max(1e-3);
+    let desired_mid = match clarity {
+        ClarityProfile::Balanced => 0.52,
+        ClarityProfile::Sharp => 0.58,
+        ClarityProfile::Extreme => 0.64,
     };
-    let target = (desired_mid / p85).clamp(0.55, 2.6);
-    *exposure = (*exposure + (target - *exposure) * 0.12).clamp(0.35, 3.2);
+    let target = (desired_mid / p75).clamp(0.50, 3.2);
+    *exposure = (*exposure + (target - *exposure) * 0.14).clamp(0.28, 3.8);
 }
 
 fn tone_map_intensity(raw: f32, floor: f32, gamma: f32, exposure: f32) -> f32 {
@@ -1772,11 +1836,16 @@ const ADAPTIVE_ASCII_NORMAL: [char; 10] = [' ', '.', ':', '-', '=', '+', '*', '#
 const ADAPTIVE_ASCII_HIGH: [char; 11] = [' ', ' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
 
 fn contrast_params(config: &RenderConfig, cells: usize) -> ContrastParams {
+    let (clarity_floor_mul, clarity_gamma_mul, clarity_fog_mul) = match config.clarity_profile {
+        ClarityProfile::Balanced => (1.0, 1.0, 1.0),
+        ClarityProfile::Sharp => (1.12, 0.92, 0.92),
+        ClarityProfile::Extreme => (1.24, 0.86, 0.84),
+    };
     match config.contrast_profile {
         ContrastProfile::Fixed => ContrastParams {
-            floor: config.contrast_floor.clamp(0.0, 0.4),
-            gamma: config.contrast_gamma.clamp(0.55, 1.40),
-            fog_scale: config.fog_scale.clamp(0.25, 1.5),
+            floor: (config.contrast_floor * clarity_floor_mul).clamp(0.0, 0.45),
+            gamma: (config.contrast_gamma * clarity_gamma_mul).clamp(0.50, 1.35),
+            fog_scale: (config.fog_scale * clarity_fog_mul).clamp(0.20, 1.5),
         },
         ContrastProfile::Adaptive => {
             let (bucket_floor, bucket_gamma, bucket_fog) = if cells < 6_000 {
@@ -1789,9 +1858,10 @@ fn contrast_params(config: &RenderConfig, cells: usize) -> ContrastParams {
             let floor_scale = (config.contrast_floor / 0.10).clamp(0.5, 2.0);
             let gamma_scale = (config.contrast_gamma / 0.90).clamp(0.6, 1.5);
             ContrastParams {
-                floor: (bucket_floor * floor_scale).clamp(0.02, 0.35),
-                gamma: (bucket_gamma * gamma_scale).clamp(0.55, 1.20),
-                fog_scale: (bucket_fog * config.fog_scale.clamp(0.25, 1.5)).clamp(0.25, 1.5),
+                floor: (bucket_floor * floor_scale * clarity_floor_mul).clamp(0.02, 0.42),
+                gamma: (bucket_gamma * gamma_scale * clarity_gamma_mul).clamp(0.50, 1.20),
+                fog_scale: (bucket_fog * config.fog_scale.clamp(0.25, 1.5) * clarity_fog_mul)
+                    .clamp(0.20, 1.5),
             }
         }
     }
@@ -1819,7 +1889,9 @@ fn select_charset<'a>(config: &RenderConfig, fallback: &'a [char], cells: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::{BrailleProfile, CellAspectMode, ColorMode, RenderConfig, ThemeStyle};
+    use crate::scene::{
+        AnsiQuantization, BrailleProfile, CellAspectMode, ColorMode, RenderConfig, ThemeStyle,
+    };
 
     #[test]
     fn adaptive_contrast_is_in_range() {
@@ -1878,7 +1950,7 @@ mod tests {
             &sub,
             &config,
             theme_palette(config.theme_style),
-            braille_thresholds(config.braille_profile, false),
+            braille_thresholds(config.braille_profile, config.clarity_profile, false),
         );
         assert_ne!(frame.glyphs[0], ' ');
         assert_ne!(frame.glyphs[0], '⠀');
@@ -1893,7 +1965,7 @@ mod tests {
         frame.fg_rgb[0] = [255, 0, 0];
         frame.fg_rgb[1] = [0, 255, 0];
         let mut out = String::new();
-        encode_ansi_frame(&frame, &mut out);
+        encode_ansi_frame(&frame, &mut out, AnsiQuantization::Off);
         assert!(out.contains("\x1b[38;2;255;0;0m"));
         assert!(out.contains("\x1b[38;2;0;255;0m"));
         assert!(out.contains("@"));

@@ -21,17 +21,17 @@ use crate::{
     loader,
     runtime::{config::UiLanguage, terminal::RatatuiSession},
     scene::{
-        AudioReactiveMode, BrailleProfile, CameraFocusMode, CellAspectMode, CenterLockMode,
-        CinematicCameraMode, ColorMode, ContrastProfile, DetailProfile, PerfProfile, RenderBackend,
-        RenderConfig, RenderMode, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
-        estimate_cell_aspect_from_window, resolve_cell_aspect,
+        AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraFocusMode, CellAspectMode,
+        CenterLockMode, CinematicCameraMode, ClarityProfile, ColorMode, ContrastProfile,
+        DetailProfile, PerfProfile, RenderBackend, RenderConfig, RenderMode, SyncSpeedMode,
+        TextureSamplingMode, ThemeStyle, estimate_cell_aspect_from_window, resolve_cell_aspect,
     },
 };
 
 const MIN_WIDTH: u16 = 60;
 const MIN_HEIGHT: u16 = 18;
 const START_FPS_OPTIONS: [u32; 9] = [0, 15, 20, 24, 30, 40, 60, 90, 120];
-const RENDER_FIELD_COUNT: usize = 22;
+const RENDER_FIELD_COUNT: usize = 26;
 const SYNC_OFFSET_STEP_MS: i32 = 10;
 const SYNC_OFFSET_LIMIT_MS: i32 = 5_000;
 
@@ -39,6 +39,7 @@ const SYNC_OFFSET_LIMIT_MS: i32 = 5_000;
 pub enum StartWizardStep {
     Model,
     Music,
+    Stage,
     Render,
     AspectCalib,
     Confirm,
@@ -49,11 +50,45 @@ impl StartWizardStep {
         match self {
             StartWizardStep::Model => 0,
             StartWizardStep::Music => 1,
-            StartWizardStep::Render => 2,
-            StartWizardStep::AspectCalib => 3,
-            StartWizardStep::Confirm => 4,
+            StartWizardStep::Stage => 2,
+            StartWizardStep::Render => 3,
+            StartWizardStep::AspectCalib => 4,
+            StartWizardStep::Confirm => 5,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageStatus {
+    Ready,
+    NeedsConvert,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StageTransform {
+    pub offset: [f32; 3],
+    pub scale: f32,
+    pub rotation_deg: [f32; 3],
+}
+
+impl Default for StageTransform {
+    fn default() -> Self {
+        Self {
+            offset: [0.0, 0.0, 0.0],
+            scale: 1.0,
+            rotation_deg: [0.0, 0.0, 0.0],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StageChoice {
+    pub name: String,
+    pub status: StageStatus,
+    pub render_path: Option<PathBuf>,
+    pub pmx_path: Option<PathBuf>,
+    pub transform: StageTransform,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,12 +110,16 @@ pub struct StartWizardDefaults {
     pub mode: RenderMode,
     pub perf_profile: PerfProfile,
     pub detail_profile: DetailProfile,
+    pub clarity_profile: ClarityProfile,
+    pub ansi_quantization: AnsiQuantization,
     pub backend: RenderBackend,
     pub center_lock: bool,
     pub center_lock_mode: CenterLockMode,
     pub camera_focus: CameraFocusMode,
     pub material_color: bool,
     pub texture_sampling: TextureSamplingMode,
+    pub model_lift: f32,
+    pub edge_accent_strength: f32,
     pub braille_aspect_compensation: f32,
     pub stage_level: u8,
     pub stage_reactive: bool,
@@ -103,16 +142,20 @@ pub struct StartWizardDefaults {
 impl Default for StartWizardDefaults {
     fn default() -> Self {
         Self {
-            mode: RenderMode::Ascii,
+            mode: RenderMode::Braille,
             perf_profile: PerfProfile::Balanced,
             detail_profile: DetailProfile::Balanced,
+            clarity_profile: ClarityProfile::Sharp,
+            ansi_quantization: AnsiQuantization::Q216,
             backend: RenderBackend::Cpu,
             center_lock: true,
             center_lock_mode: CenterLockMode::Root,
             camera_focus: CameraFocusMode::Auto,
             material_color: true,
             texture_sampling: TextureSamplingMode::Nearest,
-            braille_aspect_compensation: 0.90,
+            model_lift: 0.12,
+            edge_accent_strength: 0.32,
+            braille_aspect_compensation: 1.00,
             stage_level: 2,
             stage_reactive: true,
             color_mode: ColorMode::Mono,
@@ -121,7 +164,7 @@ impl Default for StartWizardDefaults {
             audio_reactive: AudioReactiveMode::On,
             cinematic_camera: CinematicCameraMode::On,
             reactive_gain: 0.35,
-            fps_cap: 30,
+            fps_cap: 20,
             cell_aspect: 0.5,
             cell_aspect_mode: CellAspectMode::Auto,
             cell_aspect_trim: 1.0,
@@ -140,12 +183,16 @@ pub struct StartSelection {
     pub mode: RenderMode,
     pub perf_profile: PerfProfile,
     pub detail_profile: DetailProfile,
+    pub clarity_profile: ClarityProfile,
+    pub ansi_quantization: AnsiQuantization,
     pub backend: RenderBackend,
     pub center_lock: bool,
     pub center_lock_mode: CenterLockMode,
     pub camera_focus: CameraFocusMode,
     pub material_color: bool,
     pub texture_sampling: TextureSamplingMode,
+    pub model_lift: f32,
+    pub edge_accent_strength: f32,
     pub braille_aspect_compensation: f32,
     pub stage_level: u8,
     pub stage_reactive: bool,
@@ -162,6 +209,8 @@ pub struct StartSelection {
     pub contrast_profile: ContrastProfile,
     pub sync_offset_ms: i32,
     pub sync_speed_mode: SyncSpeedMode,
+    pub stage_choice: Option<StageChoice>,
+    pub stage_transform: StageTransform,
     pub apply_font_preset: bool,
 }
 
@@ -197,17 +246,23 @@ struct StartWizardState {
     step: StartWizardStep,
     model_entries: Vec<StartEntry>,
     music_entries: Vec<StartEntry>,
+    stage_entries: Vec<StageChoice>,
     model_index: usize,
     music_index: usize,
+    stage_index: usize,
     mode: RenderMode,
     perf_profile: PerfProfile,
     detail_profile: DetailProfile,
+    clarity_profile: ClarityProfile,
+    ansi_quantization: AnsiQuantization,
     backend: RenderBackend,
     center_lock: bool,
     center_lock_mode: CenterLockMode,
     camera_focus: CameraFocusMode,
     material_color: bool,
     texture_sampling: TextureSamplingMode,
+    model_lift: f32,
+    edge_accent_strength: f32,
     braille_aspect_compensation: f32,
     stage_level: u8,
     stage_reactive: bool,
@@ -237,6 +292,7 @@ impl StartWizardState {
     fn new(
         model_entries: Vec<StartEntry>,
         music_entries: Vec<StartEntry>,
+        stage_entries: Vec<StageChoice>,
         defaults: StartWizardDefaults,
         width: u16,
         height: u16,
@@ -245,17 +301,23 @@ impl StartWizardState {
             step: StartWizardStep::Model,
             model_entries,
             music_entries,
+            stage_entries,
             model_index: 0,
             music_index: 0,
+            stage_index: 0,
             mode: defaults.mode,
             perf_profile: defaults.perf_profile,
             detail_profile: defaults.detail_profile,
+            clarity_profile: defaults.clarity_profile,
+            ansi_quantization: defaults.ansi_quantization,
             backend: defaults.backend,
             center_lock: defaults.center_lock,
             center_lock_mode: defaults.center_lock_mode,
             camera_focus: defaults.camera_focus,
             material_color: defaults.material_color,
             texture_sampling: defaults.texture_sampling,
+            model_lift: defaults.model_lift.clamp(0.02, 0.45),
+            edge_accent_strength: defaults.edge_accent_strength.clamp(0.0, 1.5),
             braille_aspect_compensation: defaults.braille_aspect_compensation,
             stage_level: defaults.stage_level.min(4),
             stage_reactive: defaults.stage_reactive,
@@ -350,6 +412,7 @@ impl StartWizardState {
         match self.step {
             StartWizardStep::Model => self.apply_model_key(key),
             StartWizardStep::Music => self.apply_music_key(key),
+            StartWizardStep::Stage => self.apply_stage_key(key),
             StartWizardStep::Render => self.apply_render_key(key),
             StartWizardStep::AspectCalib => self.apply_aspect_key(key),
             StartWizardStep::Confirm => self.apply_confirm_key(key),
@@ -387,11 +450,34 @@ impl StartWizardState {
                 StartWizardAction::Continue
             }
             KeyCode::Enter => {
-                self.step = StartWizardStep::Render;
+                self.step = StartWizardStep::Stage;
                 StartWizardAction::Continue
             }
             KeyCode::Esc => {
                 self.step = StartWizardStep::Model;
+                StartWizardAction::Continue
+            }
+            _ => StartWizardAction::Continue,
+        }
+    }
+
+    fn apply_stage_key(&mut self, key: KeyEvent) -> StartWizardAction {
+        let stage_len = self.stage_entries.len() + 1;
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                cycle_index(&mut self.stage_index, stage_len, -1);
+                StartWizardAction::Continue
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                cycle_index(&mut self.stage_index, stage_len, 1);
+                StartWizardAction::Continue
+            }
+            KeyCode::Enter => {
+                self.step = StartWizardStep::Render;
+                StartWizardAction::Continue
+            }
+            KeyCode::Esc => {
+                self.step = StartWizardStep::Stage;
                 StartWizardAction::Continue
             }
             _ => StartWizardAction::Continue,
@@ -468,7 +554,8 @@ impl StartWizardState {
     fn tab_forward(&mut self) {
         match self.step {
             StartWizardStep::Model => self.step = StartWizardStep::Music,
-            StartWizardStep::Music => self.step = StartWizardStep::Render,
+            StartWizardStep::Music => self.step = StartWizardStep::Stage,
+            StartWizardStep::Stage => self.step = StartWizardStep::Render,
             StartWizardStep::Render => {
                 if self.render_focus_index + 1 < RENDER_FIELD_COUNT {
                     self.render_focus_index += 1;
@@ -485,11 +572,12 @@ impl StartWizardState {
         match self.step {
             StartWizardStep::Model => {}
             StartWizardStep::Music => self.step = StartWizardStep::Model,
+            StartWizardStep::Stage => self.step = StartWizardStep::Music,
             StartWizardStep::Render => {
                 if self.render_focus_index > 0 {
                     self.render_focus_index -= 1;
                 } else {
-                    self.step = StartWizardStep::Music;
+                    self.step = StartWizardStep::Stage;
                 }
             }
             StartWizardStep::AspectCalib => self.step = StartWizardStep::Render,
@@ -503,6 +591,9 @@ impl StartWizardState {
                 self.mode = match self.mode {
                     RenderMode::Ascii => RenderMode::Braille,
                     RenderMode::Braille => RenderMode::Ascii,
+                };
+                if matches!(self.mode, RenderMode::Ascii) {
+                    self.color_mode = ColorMode::Ansi;
                 }
             }
             1 => {
@@ -520,21 +611,34 @@ impl StartWizardState {
                 };
             }
             3 => {
+                self.clarity_profile = match self.clarity_profile {
+                    ClarityProfile::Balanced => ClarityProfile::Sharp,
+                    ClarityProfile::Sharp => ClarityProfile::Extreme,
+                    ClarityProfile::Extreme => ClarityProfile::Balanced,
+                };
+            }
+            4 => {
+                self.ansi_quantization = match self.ansi_quantization {
+                    AnsiQuantization::Q216 => AnsiQuantization::Off,
+                    AnsiQuantization::Off => AnsiQuantization::Q216,
+                };
+            }
+            5 => {
                 self.backend = match self.backend {
                     RenderBackend::Cpu => RenderBackend::Gpu,
                     RenderBackend::Gpu => RenderBackend::Cpu,
                 };
             }
-            4 => {
+            6 => {
                 self.center_lock = !self.center_lock;
             }
-            5 => {
+            7 => {
                 self.center_lock_mode = match self.center_lock_mode {
                     CenterLockMode::Root => CenterLockMode::Mixed,
                     CenterLockMode::Mixed => CenterLockMode::Root,
                 };
             }
-            6 => {
+            8 => {
                 self.camera_focus = match self.camera_focus {
                     CameraFocusMode::Auto => CameraFocusMode::Full,
                     CameraFocusMode::Full => CameraFocusMode::Upper,
@@ -543,83 +647,95 @@ impl StartWizardState {
                     CameraFocusMode::Hands => CameraFocusMode::Auto,
                 };
             }
-            7 => {
+            9 => {
                 self.material_color = !self.material_color;
             }
-            8 => {
+            10 => {
                 self.texture_sampling = match self.texture_sampling {
                     TextureSamplingMode::Nearest => TextureSamplingMode::Bilinear,
                     TextureSamplingMode::Bilinear => TextureSamplingMode::Nearest,
                 };
             }
-            9 => {
+            11 => {
+                let step = 0.01 * (delta as f32);
+                self.model_lift = (self.model_lift + step).clamp(0.02, 0.45);
+            }
+            12 => {
+                let step = 0.05 * (delta as f32);
+                self.edge_accent_strength = (self.edge_accent_strength + step).clamp(0.0, 1.5);
+            }
+            13 => {
                 let value = (self.stage_level as i32 + delta).clamp(0, 4);
                 self.stage_level = value as u8;
             }
-            10 => {
-                self.color_mode = match self.color_mode {
-                    ColorMode::Mono => ColorMode::Ansi,
-                    ColorMode::Ansi => ColorMode::Mono,
-                };
+            14 => {
+                if matches!(self.mode, RenderMode::Braille) {
+                    self.color_mode = match self.color_mode {
+                        ColorMode::Mono => ColorMode::Ansi,
+                        ColorMode::Ansi => ColorMode::Mono,
+                    };
+                } else {
+                    self.color_mode = ColorMode::Ansi;
+                }
             }
-            11 => {
+            15 => {
                 self.braille_profile = match self.braille_profile {
                     BrailleProfile::Safe => BrailleProfile::Normal,
                     BrailleProfile::Normal => BrailleProfile::Dense,
                     BrailleProfile::Dense => BrailleProfile::Safe,
                 };
             }
-            12 => {
+            16 => {
                 self.theme_style = match self.theme_style {
                     ThemeStyle::Theater => ThemeStyle::Neon,
                     ThemeStyle::Neon => ThemeStyle::Holo,
                     ThemeStyle::Holo => ThemeStyle::Theater,
                 };
             }
-            13 => {
+            17 => {
                 self.audio_reactive = match self.audio_reactive {
                     AudioReactiveMode::Off => AudioReactiveMode::On,
                     AudioReactiveMode::On => AudioReactiveMode::High,
                     AudioReactiveMode::High => AudioReactiveMode::Off,
                 };
             }
-            14 => {
+            18 => {
                 self.cinematic_camera = match self.cinematic_camera {
                     CinematicCameraMode::Off => CinematicCameraMode::On,
                     CinematicCameraMode::On => CinematicCameraMode::Aggressive,
                     CinematicCameraMode::Aggressive => CinematicCameraMode::Off,
                 };
             }
-            15 => {
+            19 => {
                 let step = 0.05 * (delta as f32);
                 self.reactive_gain = (self.reactive_gain + step).clamp(0.0, 1.0);
             }
-            16 => cycle_index(&mut self.fps_index, START_FPS_OPTIONS.len(), delta),
-            17 => {
+            20 => cycle_index(&mut self.fps_index, START_FPS_OPTIONS.len(), delta),
+            21 => {
                 self.contrast_profile = match self.contrast_profile {
                     ContrastProfile::Adaptive => ContrastProfile::Fixed,
                     ContrastProfile::Fixed => ContrastProfile::Adaptive,
                 }
             }
-            18 => {
+            22 => {
                 let next = self
                     .sync_offset_ms
                     .saturating_add(delta.saturating_mul(SYNC_OFFSET_STEP_MS));
                 self.sync_offset_ms = next.clamp(-SYNC_OFFSET_LIMIT_MS, SYNC_OFFSET_LIMIT_MS);
             }
-            19 => {
+            23 => {
                 self.sync_speed_mode = match self.sync_speed_mode {
                     SyncSpeedMode::AutoDurationFit => SyncSpeedMode::Realtime1x,
                     SyncSpeedMode::Realtime1x => SyncSpeedMode::AutoDurationFit,
                 }
             }
-            20 => {
+            24 => {
                 self.cell_aspect_mode = match self.cell_aspect_mode {
                     CellAspectMode::Auto => CellAspectMode::Manual,
                     CellAspectMode::Manual => CellAspectMode::Auto,
                 }
             }
-            21 => {
+            25 => {
                 self.font_preset_enabled = !self.font_preset_enabled;
             }
             _ => {}
@@ -628,22 +744,35 @@ impl StartWizardState {
 
     fn selection(&self) -> StartSelection {
         let glb_path = self.model_entries[self.model_index].path.clone();
+        let stage_choice = self.selected_stage_choice();
+        let stage_transform = stage_choice
+            .as_ref()
+            .map(|choice| choice.transform)
+            .unwrap_or_default();
         StartSelection {
             glb_path,
             music_path: self.selected_music_path().cloned(),
             mode: self.mode,
             perf_profile: self.perf_profile,
             detail_profile: self.detail_profile,
+            clarity_profile: self.clarity_profile,
+            ansi_quantization: self.ansi_quantization,
             backend: self.backend,
             center_lock: self.center_lock,
             center_lock_mode: self.center_lock_mode,
             camera_focus: self.camera_focus,
             material_color: self.material_color,
             texture_sampling: self.texture_sampling,
+            model_lift: self.model_lift,
+            edge_accent_strength: self.edge_accent_strength,
             braille_aspect_compensation: self.braille_aspect_compensation,
             stage_level: self.stage_level,
             stage_reactive: self.stage_reactive,
-            color_mode: self.color_mode,
+            color_mode: if matches!(self.mode, RenderMode::Ascii) {
+                ColorMode::Ansi
+            } else {
+                self.color_mode
+            },
             braille_profile: self.braille_profile,
             theme_style: self.theme_style,
             audio_reactive: self.audio_reactive,
@@ -656,6 +785,8 @@ impl StartWizardState {
             contrast_profile: self.contrast_profile,
             sync_offset_ms: self.sync_offset_ms,
             sync_speed_mode: self.sync_speed_mode,
+            stage_choice,
+            stage_transform,
             apply_font_preset: self.font_preset_enabled,
         }
     }
@@ -667,6 +798,16 @@ impl StartWizardState {
             self.music_entries
                 .get(self.music_index.saturating_sub(1))
                 .map(|entry| &entry.path)
+        }
+    }
+
+    fn selected_stage_choice(&self) -> Option<StageChoice> {
+        if self.stage_index == 0 {
+            None
+        } else {
+            self.stage_entries
+                .get(self.stage_index.saturating_sub(1))
+                .cloned()
         }
     }
 
@@ -695,6 +836,8 @@ impl StartWizardState {
             mode: self.mode,
             perf_profile: self.perf_profile,
             detail_profile: self.detail_profile,
+            clarity_profile: self.clarity_profile,
+            ansi_quantization: self.ansi_quantization,
             backend: self.backend,
             center_lock: self.center_lock,
             center_lock_mode: self.center_lock_mode,
@@ -702,8 +845,15 @@ impl StartWizardState {
             stage_reactive: self.stage_reactive,
             material_color: self.material_color,
             texture_sampling: self.texture_sampling,
+            model_lift: self.model_lift,
+            edge_accent_strength: self.edge_accent_strength,
             braille_aspect_compensation: self.braille_aspect_compensation,
-            color_mode: self.color_mode,
+            color_mode: if matches!(self.mode, RenderMode::Ascii) {
+                ColorMode::Ansi
+            } else {
+                self.color_mode
+            },
+            ascii_force_color: true,
             braille_profile: self.braille_profile,
             theme_style: self.theme_style,
             audio_reactive: self.audio_reactive,
@@ -741,8 +891,10 @@ enum StartWizardAction {
 pub fn run_start_wizard(
     model_dir: &Path,
     music_dir: &Path,
+    stage_dir: &Path,
     model_files: &[PathBuf],
     music_files: &[PathBuf],
+    stage_entries: &[StageChoice],
     defaults: StartWizardDefaults,
     ui_language: UiLanguage,
     anim_selector: Option<&str>,
@@ -759,15 +911,23 @@ pub fn run_start_wizard(
         .iter()
         .map(|path| StartEntry::from_path(path))
         .collect::<Vec<_>>();
+    let stage_entries = stage_entries.to_vec();
 
     let mut terminal = RatatuiSession::enter()?;
     let (width, height) = terminal.size()?;
-    let mut state = StartWizardState::new(model_entries, music_entries, defaults, width, height);
+    let mut state = StartWizardState::new(
+        model_entries,
+        music_entries,
+        stage_entries,
+        defaults,
+        width,
+        height,
+    );
 
     loop {
         state.refresh_runtime_metrics(anim_selector);
         terminal.draw(|frame| {
-            draw_start_wizard(frame, model_dir, music_dir, &state, ui_language);
+            draw_start_wizard(frame, model_dir, music_dir, stage_dir, &state, ui_language);
         })?;
 
         let next_event = if event::poll(Duration::from_millis(120))? {
@@ -797,6 +957,7 @@ fn draw_start_wizard(
     frame: &mut Frame,
     model_dir: &Path,
     music_dir: &Path,
+    stage_dir: &Path,
     state: &StartWizardState,
     ui_language: UiLanguage,
 ) {
@@ -830,7 +991,15 @@ fn draw_start_wizard(
                 .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
                 .split(main[1]);
             draw_step_panel(frame, body[0], state, ui_language);
-            draw_summary_panel(frame, body[1], model_dir, music_dir, state, ui_language);
+            draw_summary_panel(
+                frame,
+                body[1],
+                model_dir,
+                music_dir,
+                stage_dir,
+                state,
+                ui_language,
+            );
         }
         UiBreakpoint::Normal => {
             let body = Layout::default()
@@ -838,7 +1007,15 @@ fn draw_start_wizard(
                 .constraints([Constraint::Min(8), Constraint::Length(10)])
                 .split(main[1]);
             draw_step_panel(frame, body[0], state, ui_language);
-            draw_summary_panel(frame, body[1], model_dir, music_dir, state, ui_language);
+            draw_summary_panel(
+                frame,
+                body[1],
+                model_dir,
+                music_dir,
+                stage_dir,
+                state,
+                ui_language,
+            );
         }
         UiBreakpoint::Compact => {
             draw_step_panel(frame, main[1], state, ui_language);
@@ -857,6 +1034,7 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &StartWizardState, ui_langu
     let step_name = match state.step {
         StartWizardStep::Model => tr(ui_language, "모델 선택", "Model"),
         StartWizardStep::Music => tr(ui_language, "음악 선택", "Music"),
+        StartWizardStep::Stage => tr(ui_language, "스테이지 선택", "Stage"),
         StartWizardStep::Render => tr(ui_language, "렌더 옵션", "Render"),
         StartWizardStep::AspectCalib => tr(ui_language, "비율 보정", "Aspect Calib"),
         StartWizardStep::Confirm => tr(ui_language, "확인/실행", "Confirm"),
@@ -864,7 +1042,7 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &StartWizardState, ui_langu
     let line = Line::from(vec![
         Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("  •  "),
-        Span::raw(format!("{} {}/5", step_name, state.step.index() + 1)),
+        Span::raw(format!("{} {}/6", step_name, state.step.index() + 1)),
     ]);
 
     let para = Paragraph::new(line).block(Block::default().borders(Borders::ALL));
@@ -880,6 +1058,7 @@ fn draw_step_panel(
     match state.step {
         StartWizardStep::Model => draw_model_list(frame, area, state, ui_language),
         StartWizardStep::Music => draw_music_list(frame, area, state, ui_language),
+        StartWizardStep::Stage => draw_stage_list(frame, area, state, ui_language),
         StartWizardStep::Render => draw_render_options(frame, area, state, ui_language),
         StartWizardStep::AspectCalib => draw_aspect_calibration(frame, area, state, ui_language),
         StartWizardStep::Confirm => draw_confirm_panel(frame, area, state, ui_language),
@@ -939,13 +1118,47 @@ fn draw_music_list(
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
+fn draw_stage_list(
+    frame: &mut Frame,
+    area: Rect,
+    state: &StartWizardState,
+    ui_language: UiLanguage,
+) {
+    let title = tr(
+        ui_language,
+        "3) 스테이지를 선택해 주세요",
+        "3) Select Stage",
+    );
+    let mut items = Vec::with_capacity(state.stage_entries.len() + 1);
+    items.push(ListItem::new(tr(ui_language, "없음", "None")));
+    items.extend(state.stage_entries.iter().map(|entry| {
+        let badge = match entry.status {
+            StageStatus::Ready => tr(ui_language, "사용 가능", "Ready"),
+            StageStatus::NeedsConvert => tr(ui_language, "PMX 변환 필요", "Needs PMX->GLB"),
+            StageStatus::Invalid => tr(ui_language, "사용 불가", "Invalid"),
+        };
+        ListItem::new(format!("{}  [{}]", entry.name, badge))
+    }));
+    let mut list_state = ListState::default();
+    list_state.select(Some(state.stage_index));
+    let list = List::new(items)
+        .block(Block::default().title(title).borders(Borders::ALL))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
+
 fn draw_render_options(
     frame: &mut Frame,
     area: Rect,
     state: &StartWizardState,
     ui_language: UiLanguage,
 ) {
-    let title = tr(ui_language, "3) 렌더 옵션", "3) Render Options");
+    let title = tr(ui_language, "4) 렌더 옵션", "4) Render Options");
     let mode = match state.mode {
         RenderMode::Ascii => "ASCII",
         RenderMode::Braille => "Braille",
@@ -960,6 +1173,15 @@ fn draw_render_options(
         DetailProfile::Balanced => tr(ui_language, "균형", "Balanced"),
         DetailProfile::Ultra => tr(ui_language, "고품질", "Ultra"),
     };
+    let clarity_profile = match state.clarity_profile {
+        ClarityProfile::Balanced => tr(ui_language, "균형", "Balanced"),
+        ClarityProfile::Sharp => tr(ui_language, "선명", "Sharp"),
+        ClarityProfile::Extreme => tr(ui_language, "극선명", "Extreme"),
+    };
+    let ansi_quantization = match state.ansi_quantization {
+        AnsiQuantization::Q216 => "q216",
+        AnsiQuantization::Off => tr(ui_language, "끄기(truecolor)", "off (truecolor)"),
+    };
     let backend = match state.backend {
         RenderBackend::Cpu => "CPU",
         RenderBackend::Gpu => "GPU",
@@ -969,9 +1191,13 @@ fn draw_render_options(
     } else {
         tr(ui_language, "꺼짐", "Off")
     };
-    let color_mode = match state.color_mode {
-        ColorMode::Mono => tr(ui_language, "모노", "Mono"),
-        ColorMode::Ansi => tr(ui_language, "ANSI", "ANSI"),
+    let color_mode = if matches!(state.mode, RenderMode::Ascii) {
+        tr(ui_language, "항상 ON (ANSI)", "Always ON (ANSI)")
+    } else {
+        match state.color_mode {
+            ColorMode::Mono => tr(ui_language, "모노", "Mono"),
+            ColorMode::Ansi => tr(ui_language, "ANSI", "ANSI"),
+        }
     };
     let braille_profile = match state.braille_profile {
         BrailleProfile::Safe => tr(ui_language, "안전", "Safe"),
@@ -979,8 +1205,8 @@ fn draw_render_options(
         BrailleProfile::Dense => tr(ui_language, "고밀도", "Dense"),
     };
     let theme = match state.theme_style {
-        ThemeStyle::Theater => tr(ui_language, "극장 실루엣", "Theater Silhouette"),
-        ThemeStyle::Neon => tr(ui_language, "네온 스테이지", "Neon Stage"),
+        ThemeStyle::Theater => tr(ui_language, "극장", "Theater"),
+        ThemeStyle::Neon => tr(ui_language, "네온", "Neon"),
         ThemeStyle::Holo => tr(ui_language, "홀로그램", "Hologram"),
     };
     let audio_reactive = match state.audio_reactive {
@@ -1043,6 +1269,16 @@ fn draw_render_options(
             tr(ui_language, "디테일 프로필", "Detail Profile"),
             detail_profile
         ),
+        format!(
+            "{}: {}",
+            tr(ui_language, "선명도 프로필", "Clarity Profile"),
+            clarity_profile
+        ),
+        format!(
+            "{}: {}",
+            tr(ui_language, "ANSI 양자화", "ANSI Quantization"),
+            ansi_quantization
+        ),
         format!("{}: {}", tr(ui_language, "백엔드", "Backend"), backend),
         format!(
             "{}: {}",
@@ -1070,6 +1306,16 @@ fn draw_render_options(
             texture_sampling
         ),
         format!(
+            "{}: {:.2}",
+            tr(ui_language, "모델 리프트", "Model Lift"),
+            state.model_lift
+        ),
+        format!(
+            "{}: {:.2}",
+            tr(ui_language, "엣지 강조", "Edge Accent"),
+            state.edge_accent_strength
+        ),
+        format!(
             "{}: {}",
             tr(ui_language, "스테이지 레벨", "Stage Level"),
             state.stage_level
@@ -1084,7 +1330,11 @@ fn draw_render_options(
             tr(ui_language, "Braille 프로필", "Braille Profile"),
             braille_profile
         ),
-        format!("{}: {}", tr(ui_language, "테마", "Theme"), theme),
+        format!(
+            "{}: {}",
+            tr(ui_language, "분위기/조명 스타일", "Mood/Lighting"),
+            theme
+        ),
         format!(
             "{}: {}",
             tr(ui_language, "음악 반응", "Audio Reactive"),
@@ -1190,7 +1440,7 @@ fn draw_aspect_calibration(
     let info_widget = Paragraph::new(info)
         .block(
             Block::default()
-                .title(tr(ui_language, "4) 비율 보정", "4) Aspect Calibration"))
+                .title(tr(ui_language, "5) 비율 보정", "5) Aspect Calibration"))
                 .borders(Borders::ALL),
         )
         .wrap(Wrap { trim: false });
@@ -1238,9 +1488,13 @@ fn draw_confirm_panel(
     let clip_duration = state.selected_clip_duration_secs();
     let audio_duration = state.selected_audio_duration_secs();
     let speed = state.expected_sync_speed();
-    let color_mode = match selection.color_mode {
-        ColorMode::Mono => "Mono",
-        ColorMode::Ansi => "ANSI",
+    let color_mode = if matches!(selection.mode, RenderMode::Ascii) {
+        "ANSI (ASCII fixed)"
+    } else {
+        match selection.color_mode {
+            ColorMode::Mono => "Mono",
+            ColorMode::Ansi => "ANSI",
+        }
     };
     let perf_profile = match selection.perf_profile {
         PerfProfile::Balanced => "Balanced",
@@ -1276,6 +1530,29 @@ fn draw_confirm_panel(
         CinematicCameraMode::On => "On",
         CinematicCameraMode::Aggressive => "Aggressive",
     };
+    let clarity_profile = match selection.clarity_profile {
+        ClarityProfile::Balanced => "Balanced",
+        ClarityProfile::Sharp => "Sharp",
+        ClarityProfile::Extreme => "Extreme",
+    };
+    let color_path = match selection.ansi_quantization {
+        AnsiQuantization::Q216 => "ANSI q216",
+        AnsiQuantization::Off => "ANSI truecolor",
+    };
+    let stage_name = selection
+        .stage_choice
+        .as_ref()
+        .map(|choice| choice.name.as_str())
+        .unwrap_or_else(|| tr(ui_language, "없음", "None"));
+    let stage_status = selection
+        .stage_choice
+        .as_ref()
+        .map(|choice| match choice.status {
+            StageStatus::Ready => tr(ui_language, "사용 가능", "Ready"),
+            StageStatus::NeedsConvert => tr(ui_language, "PMX 변환 필요", "Needs PMX->GLB"),
+            StageStatus::Invalid => tr(ui_language, "사용 불가", "Invalid"),
+        })
+        .unwrap_or_else(|| tr(ui_language, "선택 안함", "Not selected"));
 
     let lines = vec![
         Line::raw(format!(
@@ -1289,19 +1566,26 @@ fn draw_confirm_panel(
             music_name
         )),
         Line::raw(format!(
+            "{}: {} ({})",
+            tr(ui_language, "스테이지", "Stage"),
+            stage_name,
+            stage_status
+        )),
+        Line::raw(format!(
             "{}: {:?}",
             tr(ui_language, "렌더 모드", "Render"),
             selection.mode
         )),
         Line::raw(format!(
-            "{}: {} / {} / {}",
+            "{}: {} / {} / {} / {}",
             tr(
                 ui_language,
-                "프로필/디테일/백엔드",
-                "Profile/Detail/Backend"
+                "프로필/디테일/선명도/백엔드",
+                "Profile/Detail/Clarity/Backend"
             ),
             perf_profile,
             detail_profile,
+            clarity_profile,
             backend
         )),
         Line::raw(format!(
@@ -1327,14 +1611,15 @@ fn draw_confirm_panel(
             selection.texture_sampling
         )),
         Line::raw(format!(
-            "{}: {} / {}",
-            tr(ui_language, "컬러/프로필", "Color/Profile"),
+            "{}: {} / {} / {}",
+            tr(ui_language, "컬러/프로필/경로", "Color/Profile/Path"),
             color_mode,
-            braille_profile
+            braille_profile,
+            color_path
         )),
         Line::raw(format!(
             "{}: {} / {}",
-            tr(ui_language, "테마/반응", "Theme/Reactive"),
+            tr(ui_language, "분위기/반응", "Mood/Reactive"),
             theme_style,
             audio_reactive
         )),
@@ -1398,7 +1683,7 @@ fn draw_confirm_panel(
     let para = Paragraph::new(lines)
         .block(
             Block::default()
-                .title(tr(ui_language, "5) 확인 / 실행", "5) Confirm / Run"))
+                .title(tr(ui_language, "6) 확인 / 실행", "6) Confirm / Run"))
                 .borders(Borders::ALL),
         )
         .wrap(Wrap { trim: false });
@@ -1410,6 +1695,7 @@ fn draw_summary_panel(
     area: Rect,
     model_dir: &Path,
     music_dir: &Path,
+    stage_dir: &Path,
     state: &StartWizardState,
     ui_language: UiLanguage,
 ) {
@@ -1426,6 +1712,20 @@ fn draw_summary_panel(
         .and_then(|name| name.to_str())
         .map(|s| s.to_owned())
         .unwrap_or_else(|| tr(ui_language, "없음", "None").to_owned());
+    let stage_name = selection
+        .stage_choice
+        .as_ref()
+        .map(|choice| choice.name.as_str())
+        .unwrap_or_else(|| tr(ui_language, "없음", "None"));
+    let stage_status = selection
+        .stage_choice
+        .as_ref()
+        .map(|choice| match choice.status {
+            StageStatus::Ready => tr(ui_language, "사용 가능", "Ready"),
+            StageStatus::NeedsConvert => tr(ui_language, "PMX 변환 필요", "Needs PMX->GLB"),
+            StageStatus::Invalid => tr(ui_language, "사용 불가", "Invalid"),
+        })
+        .unwrap_or_else(|| tr(ui_language, "선택 안함", "Not selected"));
 
     let lines = vec![
         Line::raw(format!(
@@ -1440,6 +1740,11 @@ fn draw_summary_panel(
         )),
         Line::raw(format!(
             "{}: {}",
+            tr(ui_language, "스테이지 경로", "Stage Dir"),
+            stage_dir.display()
+        )),
+        Line::raw(format!(
+            "{}: {}",
             tr(ui_language, "모델", "Model"),
             model_name
         )),
@@ -1447,6 +1752,12 @@ fn draw_summary_panel(
             "{}: {}",
             tr(ui_language, "음악", "Music"),
             music_name
+        )),
+        Line::raw(format!(
+            "{}: {} ({})",
+            tr(ui_language, "스테이지", "Stage"),
+            stage_name,
+            stage_status
         )),
         Line::raw(format!(
             "{}: {:.3}",
@@ -1460,14 +1771,15 @@ fn draw_summary_panel(
             selection.color_mode
         )),
         Line::raw(format!(
-            "{}: {:?} / {:?} / {:?}",
+            "{}: {:?} / {:?} / {:?} / {:?}",
             tr(
                 ui_language,
-                "프로필/디테일/백엔드",
-                "Profile/Detail/Backend"
+                "프로필/디테일/선명도/백엔드",
+                "Profile/Detail/Clarity/Backend"
             ),
             selection.perf_profile,
             selection.detail_profile,
+            selection.clarity_profile,
             selection.backend
         )),
         Line::raw(format!(
@@ -1493,9 +1805,10 @@ fn draw_summary_panel(
             selection.texture_sampling
         )),
         Line::raw(format!(
-            "{}: {:?}",
-            tr(ui_language, "Braille 프로필", "Braille Profile"),
-            selection.braille_profile
+            "{}: {:?} / {:?}",
+            tr(ui_language, "Braille/색경로", "Braille/Color Path"),
+            selection.braille_profile,
+            selection.ansi_quantization
         )),
         Line::raw(format!(
             "{}: {:?} / {:?}",
@@ -1553,6 +1866,11 @@ fn draw_help_panel(
             ui_language,
             "음악: ↑/↓ 선택, Enter 다음, Esc 이전",
             "Music: ↑/↓ select, Enter next, Esc back",
+        ),
+        StartWizardStep::Stage => tr(
+            ui_language,
+            "스테이지: ↑/↓ 선택, Enter 다음, Esc 이전",
+            "Stage: ↑/↓ select, Enter next, Esc back",
         ),
         StartWizardStep::Render => tr(
             ui_language,
@@ -1778,9 +2096,17 @@ mod tests {
     fn test_state() -> StartWizardState {
         let model_entries = vec![StartEntry::from_path(Path::new("miku.glb"))];
         let music_entries = vec![StartEntry::from_path(Path::new("world.mp3"))];
+        let stage_entries = vec![StageChoice {
+            name: "default-stage".to_owned(),
+            status: StageStatus::Ready,
+            render_path: Some(PathBuf::from("assets/stage/default-stage/stage.glb")),
+            pmx_path: None,
+            transform: StageTransform::default(),
+        }];
         StartWizardState::new(
             model_entries,
             music_entries,
+            stage_entries,
             StartWizardDefaults::default(),
             120,
             35,
@@ -1797,6 +2123,12 @@ mod tests {
             StartWizardAction::Continue
         ));
         assert_eq!(state.step, StartWizardStep::Music);
+
+        assert!(matches!(
+            state.apply_event(key(KeyCode::Enter)),
+            StartWizardAction::Continue
+        ));
+        assert_eq!(state.step, StartWizardStep::Stage);
 
         assert!(matches!(
             state.apply_event(key(KeyCode::Enter)),
@@ -1881,6 +2213,7 @@ mod tests {
                         frame,
                         Path::new("assets/glb"),
                         Path::new("assets/music"),
+                        Path::new("assets/stage"),
                         &state,
                         UiLanguage::Ko,
                     );

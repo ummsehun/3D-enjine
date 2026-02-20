@@ -12,7 +12,7 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use crate::renderer::FrameBuffers;
+use crate::{renderer::FrameBuffers, scene::AnsiQuantization};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentMode {
@@ -106,7 +106,12 @@ impl TerminalSession {
         Ok(())
     }
 
-    pub fn present(&mut self, frame: &FrameBuffers, use_ansi: bool) -> Result<()> {
+    pub fn present(
+        &mut self,
+        frame: &FrameBuffers,
+        use_ansi: bool,
+        quantization: AnsiQuantization,
+    ) -> Result<()> {
         if self.presenter.width != frame.width || self.presenter.height != frame.height {
             self.presenter.resize(frame.width, frame.height);
             self.presenter.force_full_repaint = true;
@@ -115,12 +120,16 @@ impl TerminalSession {
         if self.presenter.last_has_color != use_ansi {
             self.presenter.force_full_repaint = true;
         }
+        if self.presenter.last_quantization != quantization {
+            self.presenter.force_full_repaint = true;
+        }
 
         if matches!(self.presenter.mode, PresentMode::FullFallback)
             || self.presenter.force_full_repaint
         {
-            self.draw_full_frame(frame, use_ansi)?;
-            self.presenter.capture_snapshot(frame, use_ansi);
+            self.draw_full_frame(frame, use_ansi, quantization)?;
+            self.presenter
+                .capture_snapshot(frame, use_ansi, quantization);
             self.presenter.force_full_repaint = false;
             return Ok(());
         }
@@ -130,6 +139,7 @@ impl TerminalSession {
             &self.presenter.last_glyphs,
             &self.presenter.last_rgb,
             use_ansi,
+            quantization,
         );
 
         if segments.is_empty() {
@@ -150,7 +160,7 @@ impl TerminalSession {
             for idx in segment.start_idx..segment.end_idx_exclusive {
                 self.presenter.last_glyphs[idx] = frame.glyphs[idx];
                 self.presenter.last_rgb[idx] = if use_ansi {
-                    quantize_rgb16(frame.fg_rgb[idx])
+                    quantize_rgb(frame.fg_rgb[idx], quantization)
                 } else {
                     [255, 255, 255]
                 };
@@ -162,13 +172,19 @@ impl TerminalSession {
         }
         self.stdout.flush()?;
         self.presenter.last_has_color = use_ansi;
+        self.presenter.last_quantization = quantization;
         Ok(())
     }
 
-    fn draw_full_frame(&mut self, frame: &FrameBuffers, use_ansi: bool) -> Result<()> {
+    fn draw_full_frame(
+        &mut self,
+        frame: &FrameBuffers,
+        use_ansi: bool,
+        quantization: AnsiQuantization,
+    ) -> Result<()> {
         let mut text = String::new();
         if use_ansi {
-            frame.write_ansi_text(&mut text);
+            frame.write_ansi_text(&mut text, quantization);
             queue!(
                 self.stdout,
                 MoveTo(0, 0),
@@ -207,7 +223,7 @@ impl Drop for TerminalSession {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct TerminalPresenter {
     mode: PresentMode,
     width: u16,
@@ -215,7 +231,23 @@ struct TerminalPresenter {
     last_glyphs: Vec<char>,
     last_rgb: Vec<[u8; 3]>,
     last_has_color: bool,
+    last_quantization: AnsiQuantization,
     force_full_repaint: bool,
+}
+
+impl Default for TerminalPresenter {
+    fn default() -> Self {
+        Self {
+            mode: PresentMode::Diff,
+            width: 0,
+            height: 0,
+            last_glyphs: Vec::new(),
+            last_rgb: Vec::new(),
+            last_has_color: false,
+            last_quantization: AnsiQuantization::Q216,
+            force_full_repaint: false,
+        }
+    }
 }
 
 impl TerminalPresenter {
@@ -230,19 +262,25 @@ impl TerminalPresenter {
         self.last_has_color = false;
     }
 
-    fn capture_snapshot(&mut self, frame: &FrameBuffers, use_ansi: bool) {
+    fn capture_snapshot(
+        &mut self,
+        frame: &FrameBuffers,
+        use_ansi: bool,
+        quantization: AnsiQuantization,
+    ) {
         self.width = frame.width;
         self.height = frame.height;
         self.last_glyphs.clone_from(&frame.glyphs);
         self.last_rgb.resize(frame.fg_rgb.len(), [255, 255, 255]);
         if use_ansi {
             for (dst, src) in self.last_rgb.iter_mut().zip(frame.fg_rgb.iter().copied()) {
-                *dst = quantize_rgb16(src);
+                *dst = quantize_rgb(src, quantization);
             }
         } else {
             self.last_rgb.fill([255, 255, 255]);
         }
         self.last_has_color = use_ansi;
+        self.last_quantization = quantization;
     }
 }
 
@@ -336,6 +374,7 @@ fn build_diff_segments(
     previous_glyphs: &[char],
     previous_rgb: &[[u8; 3]],
     use_ansi: bool,
+    quantization: AnsiQuantization,
 ) -> Vec<DiffSegment> {
     let width = usize::from(frame.width);
     let height = usize::from(frame.height);
@@ -350,7 +389,14 @@ fn build_diff_segments(
         let mut x = 0usize;
         while row_start + x < row_end {
             let idx = row_start + x;
-            if !cell_changed(idx, frame, previous_glyphs, previous_rgb, use_ansi) {
+            if !cell_changed(
+                idx,
+                frame,
+                previous_glyphs,
+                previous_rgb,
+                use_ansi,
+                quantization,
+            ) {
                 x += 1;
                 continue;
             }
@@ -361,11 +407,18 @@ fn build_diff_segments(
             let mut current_rgb: Option<[u8; 3]> = None;
             while row_start + x < row_end {
                 let ridx = row_start + x;
-                if !cell_changed(ridx, frame, previous_glyphs, previous_rgb, use_ansi) {
+                if !cell_changed(
+                    ridx,
+                    frame,
+                    previous_glyphs,
+                    previous_rgb,
+                    use_ansi,
+                    quantization,
+                ) {
                     break;
                 }
                 if use_ansi {
-                    let rgb = quantize_rgb16(frame.fg_rgb[ridx]);
+                    let rgb = quantize_rgb(frame.fg_rgb[ridx], quantization);
                     if current_rgb != Some(rgb) {
                         push_fg_ansi(&mut payload, rgb);
                         current_rgb = Some(rgb);
@@ -395,6 +448,7 @@ fn cell_changed(
     previous_glyphs: &[char],
     previous_rgb: &[[u8; 3]],
     use_ansi: bool,
+    quantization: AnsiQuantization,
 ) -> bool {
     if frame.glyphs.get(idx).copied().unwrap_or(' ')
         != previous_glyphs.get(idx).copied().unwrap_or(' ')
@@ -402,7 +456,10 @@ fn cell_changed(
         return true;
     }
     if use_ansi {
-        let curr = quantize_rgb16(frame.fg_rgb.get(idx).copied().unwrap_or([255, 255, 255]));
+        let curr = quantize_rgb(
+            frame.fg_rgb.get(idx).copied().unwrap_or([255, 255, 255]),
+            quantization,
+        );
         let prev = previous_rgb.get(idx).copied().unwrap_or([255, 255, 255]);
         return curr != prev;
     }
@@ -414,39 +471,15 @@ fn push_fg_ansi(out: &mut String, rgb: [u8; 3]) {
     let _ = write!(out, "\x1b[38;2;{};{};{}m", rgb[0], rgb[1], rgb[2]);
 }
 
-fn quantize_rgb16(rgb: [u8; 3]) -> [u8; 3] {
-    const PALETTE_16: [[u8; 3]; 16] = [
-        [0, 0, 0],
-        [128, 0, 0],
-        [0, 128, 0],
-        [128, 128, 0],
-        [0, 0, 128],
-        [128, 0, 128],
-        [0, 128, 128],
-        [192, 192, 192],
-        [128, 128, 128],
-        [255, 0, 0],
-        [0, 255, 0],
-        [255, 255, 0],
-        [0, 0, 255],
-        [255, 0, 255],
-        [0, 255, 255],
-        [255, 255, 255],
-    ];
-
-    let mut best = PALETTE_16[0];
-    let mut best_dist = u32::MAX;
-    for candidate in PALETTE_16 {
-        let dr = rgb[0] as i32 - candidate[0] as i32;
-        let dg = rgb[1] as i32 - candidate[1] as i32;
-        let db = rgb[2] as i32 - candidate[2] as i32;
-        let dist = (dr * dr + dg * dg + db * db) as u32;
-        if dist < best_dist {
-            best_dist = dist;
-            best = candidate;
-        }
+fn quantize_rgb(rgb: [u8; 3], quantization: AnsiQuantization) -> [u8; 3] {
+    if matches!(quantization, AnsiQuantization::Off) {
+        return rgb;
     }
-    best
+    fn q(c: u8) -> u8 {
+        let bucket = ((c as u16 * 5 + 127) / 255) as u8;
+        bucket * 51
+    }
+    [q(rgb[0]), q(rgb[1]), q(rgb[2])]
 }
 
 pub fn supports_truecolor() -> bool {
@@ -477,7 +510,13 @@ mod tests {
         let prev_glyphs = vec!['a', 'x', 'c', 'd', 'e'];
         let prev_rgb = vec![[255, 255, 255]; 5];
 
-        let segments = build_diff_segments(&frame, &prev_glyphs, &prev_rgb, false);
+        let segments = build_diff_segments(
+            &frame,
+            &prev_glyphs,
+            &prev_rgb,
+            false,
+            AnsiQuantization::Q216,
+        );
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].x, 1);
         assert_eq!(segments[0].payload, "b");
@@ -491,9 +530,18 @@ mod tests {
         frame.fg_rgb[1] = [240, 15, 20];
 
         let prev_glyphs = vec!['@', '#'];
-        let prev_rgb = vec![quantize_rgb16([255, 0, 0]), quantize_rgb16([255, 0, 0])];
+        let prev_rgb = vec![
+            quantize_rgb([255, 0, 0], AnsiQuantization::Q216),
+            quantize_rgb([255, 0, 0], AnsiQuantization::Q216),
+        ];
 
-        let segments = build_diff_segments(&frame, &prev_glyphs, &prev_rgb, true);
+        let segments = build_diff_segments(
+            &frame,
+            &prev_glyphs,
+            &prev_rgb,
+            true,
+            AnsiQuantization::Q216,
+        );
         assert!(segments.is_empty());
     }
 }

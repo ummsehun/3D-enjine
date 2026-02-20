@@ -13,7 +13,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::window_size;
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use rodio::{Decoder, OutputStream, Sink, Source};
 
 use crate::{
@@ -25,13 +25,16 @@ use crate::{
     renderer::{Camera, FrameBuffers, GlyphRamp, RenderScratch, RenderStats},
     runtime::{
         config::{GasciiConfig, load_gascii_config},
-        start_ui::{StartWizardDefaults, run_start_wizard},
+        start_ui::{
+            StageChoice, StageStatus, StageTransform, StartWizardDefaults, run_start_wizard,
+        },
     },
     scene::{
-        AudioReactiveMode, BrailleProfile, CameraFocusMode, CellAspectMode, CenterLockMode,
-        CinematicCameraMode, ColorMode, ContrastProfile, DetailProfile, PerfProfile, RenderBackend,
-        RenderConfig, RenderMode, SceneCpu, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
-        estimate_cell_aspect_from_window, resolve_cell_aspect,
+        AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraFocusMode, CellAspectMode,
+        CenterLockMode, CinematicCameraMode, ClarityProfile, ColorMode, ContrastProfile,
+        DetailProfile, Node, PerfProfile, RenderBackend, RenderConfig, RenderMode, SceneCpu,
+        SyncSpeedMode, TextureSamplingMode, ThemeStyle, estimate_cell_aspect_from_window,
+        resolve_cell_aspect,
     },
     terminal::{PresentMode, TerminalSession, supports_truecolor},
 };
@@ -48,10 +51,14 @@ pub fn run(cli: Cli) -> Result<()> {
 
 const SYNC_OFFSET_STEP_MS: i32 = 10;
 const SYNC_OFFSET_LIMIT_MS: i32 = 5_000;
-const MAX_RENDER_COLS: u16 = 600;
-const MAX_RENDER_ROWS: u16 = 180;
+const MAX_RENDER_COLS: u16 = 4096;
+const MAX_RENDER_ROWS: u16 = 2048;
 const VISIBILITY_LOW_THRESHOLD: f32 = 0.002;
 const VISIBILITY_LOW_FRAMES_TO_RECOVER: u32 = 12;
+const LOW_VIS_EXPOSURE_THRESHOLD: f32 = 0.008;
+const LOW_VIS_EXPOSURE_TRIGGER_FRAMES: u32 = 6;
+const LOW_VIS_EXPOSURE_RECOVER_THRESHOLD: f32 = 0.020;
+const LOW_VIS_EXPOSURE_RECOVER_FRAMES: u32 = 24;
 const MIN_VISIBLE_HEIGHT_RATIO: f32 = 0.10;
 const MIN_VISIBLE_HEIGHT_TRIGGER_FRAMES: u32 = 10;
 const MIN_VISIBLE_HEIGHT_RECOVER_RATIO: f32 = 0.16;
@@ -175,6 +182,7 @@ struct RuntimeInputResult {
     resized: bool,
     stage_changed: bool,
     center_lock_blocked_pan: bool,
+    zoom_changed: bool,
     last_key: Option<&'static str>,
 }
 
@@ -309,8 +317,15 @@ impl CenterLockState {
 
         let fw = f32::from(frame_width.max(1));
         let fh = f32::from(frame_height.max(1));
-        let nx = (cx / fw - 0.5) * 2.0;
-        let ny = (cy / fh - 0.5) * 2.0;
+        // Ignore stale or out-of-range anchors (common during terminal resize transitions).
+        if cx < -fw * 0.25 || cx > fw * 1.25 || cy < -fh * 0.25 || cy > fh * 1.25 {
+            self.err_x_ema *= 0.85;
+            self.err_y_ema *= 0.85;
+            self.world_offset *= 0.92;
+            return self.world_offset;
+        }
+        let nx = ((cx / fw - 0.5) * 2.0).clamp(-1.0, 1.0);
+        let ny = ((cy / fh - 0.5) * 2.0).clamp(-1.0, 1.0);
         let dead_x = if nx.abs() < 0.015 { 0.0 } else { nx };
         let dead_y = if ny.abs() < 0.020 { 0.0 } else { ny };
 
@@ -332,6 +347,93 @@ impl CenterLockState {
         self.err_x_ema = 0.0;
         self.err_y_ema = 0.0;
         self.world_offset = Vec3::ZERO;
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScreenFitController {
+    auto_zoom_gain: f32,
+}
+
+impl Default for ScreenFitController {
+    fn default() -> Self {
+        Self {
+            auto_zoom_gain: 1.0,
+        }
+    }
+}
+
+impl ScreenFitController {
+    fn on_resize(&mut self) {
+        self.auto_zoom_gain = 1.0;
+    }
+
+    fn on_manual_zoom(&mut self) {
+        self.auto_zoom_gain = self.auto_zoom_gain.clamp(0.55, 1.80);
+    }
+
+    fn target_for_mode(mode: RenderMode) -> f32 {
+        match mode {
+            RenderMode::Ascii => 0.72,
+            RenderMode::Braille => 0.66,
+        }
+    }
+
+    fn update(&mut self, visible_height_ratio: f32, mode: RenderMode, enabled: bool) {
+        if !enabled {
+            self.auto_zoom_gain = 1.0;
+            return;
+        }
+        if !visible_height_ratio.is_finite() || visible_height_ratio <= 0.0 {
+            return;
+        }
+        let target = Self::target_for_mode(mode);
+        let err = target - visible_height_ratio;
+        if err.abs() <= 0.02 {
+            return;
+        }
+        let factor = (1.0 + err * 0.22).clamp(0.90, 1.10);
+        self.auto_zoom_gain = (self.auto_zoom_gain * factor).clamp(0.55, 1.80);
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ExposureAutoBoost {
+    low_streak: u32,
+    high_streak: u32,
+    boost: f32,
+}
+
+impl ExposureAutoBoost {
+    fn on_resize(&mut self) {
+        self.low_streak = 0;
+        self.high_streak = 0;
+        self.boost = 0.0;
+    }
+
+    fn update(&mut self, visible_ratio: f32) {
+        if visible_ratio < LOW_VIS_EXPOSURE_THRESHOLD {
+            self.low_streak = self.low_streak.saturating_add(1);
+            self.high_streak = 0;
+            if self.low_streak >= LOW_VIS_EXPOSURE_TRIGGER_FRAMES {
+                self.boost = (self.boost + 0.06).clamp(0.0, 0.45);
+                self.low_streak = 0;
+            }
+            return;
+        }
+
+        if visible_ratio > LOW_VIS_EXPOSURE_RECOVER_THRESHOLD {
+            self.high_streak = self.high_streak.saturating_add(1);
+            self.low_streak = 0;
+            if self.high_streak >= LOW_VIS_EXPOSURE_RECOVER_FRAMES {
+                self.boost = (self.boost - 0.03).clamp(0.0, 0.45);
+                self.high_streak = 0;
+            }
+            return;
+        }
+
+        self.low_streak = 0;
+        self.high_streak = 0;
     }
 }
 
@@ -375,8 +477,8 @@ impl AutoRadiusGuard {
 
 fn start(args: StartArgs) -> Result<()> {
     let runtime_cfg = load_runtime_config();
-    let visual = resolve_visual_options_for_start(&args, runtime_cfg);
-    let sync_defaults = resolve_sync_options_for_start(&args, runtime_cfg);
+    let visual = resolve_visual_options_for_start(&args, &runtime_cfg);
+    let sync_defaults = resolve_sync_options_for_start(&args, &runtime_cfg);
     let model_files = discover_glb_files(&args.dir)?;
     if model_files.is_empty() {
         bail!(
@@ -385,20 +487,30 @@ fn start(args: StartArgs) -> Result<()> {
         );
     }
     let music_files = discover_music_files(&args.music_dir)?;
+    let stage_dir = resolved_stage_dir(&args.stage_dir, &runtime_cfg);
+    let stage_entries = discover_stage_sets(&stage_dir);
     let start_mode: RenderMode = args.mode.into();
-    let default_color_mode = visual
-        .color_mode
-        .unwrap_or_else(|| default_color_mode_for_mode(start_mode));
+    let default_color_mode = resolve_effective_color_mode(
+        start_mode,
+        visual
+            .color_mode
+            .unwrap_or_else(|| default_color_mode_for_mode(start_mode)),
+        visual.ascii_force_color,
+    );
     let defaults = StartWizardDefaults {
         mode: start_mode,
         perf_profile: visual.perf_profile,
         detail_profile: visual.detail_profile,
+        clarity_profile: visual.clarity_profile,
+        ansi_quantization: visual.ansi_quantization,
         backend: visual.backend,
         center_lock: visual.center_lock,
         center_lock_mode: visual.center_lock_mode,
         camera_focus: visual.camera_focus,
         material_color: visual.material_color,
         texture_sampling: visual.texture_sampling,
+        model_lift: visual.model_lift,
+        edge_accent_strength: visual.edge_accent_strength,
         braille_aspect_compensation: visual.braille_aspect_compensation,
         stage_level: visual.stage_level,
         stage_reactive: visual.stage_reactive,
@@ -420,8 +532,10 @@ fn start(args: StartArgs) -> Result<()> {
     let Some(selection) = run_start_wizard(
         &args.dir,
         &args.music_dir,
+        &stage_dir,
         &model_files,
         &music_files,
+        &stage_entries,
         defaults,
         runtime_cfg.ui_language,
         args.anim.as_deref(),
@@ -430,9 +544,45 @@ fn start(args: StartArgs) -> Result<()> {
         return Ok(());
     };
     if selection.apply_font_preset {
-        apply_startup_font_config(runtime_cfg);
+        apply_startup_font_config(&runtime_cfg);
     }
-    let scene = loader::load_gltf(&selection.glb_path)?;
+    let mut scene = loader::load_gltf(&selection.glb_path)?;
+    if let Some(stage_choice) = selection.stage_choice.as_ref() {
+        match stage_choice.status {
+            StageStatus::Ready => {
+                if let Some(stage_path) = stage_choice.render_path.as_deref() {
+                    match load_scene_file(stage_path) {
+                        Ok(mut stage_scene) => {
+                            apply_stage_transform(&mut stage_scene, stage_choice.transform);
+                            scene = merge_scenes(scene, stage_scene);
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "warning: failed to load stage {}: {err}",
+                                stage_path.display()
+                            );
+                        }
+                    }
+                }
+            }
+            StageStatus::NeedsConvert => {
+                let pmx = stage_choice
+                    .pmx_path
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| stage_choice.name.clone());
+                bail!(
+                    "선택한 스테이지는 PMX 변환이 필요합니다: {pmx}\nBlender + MMD Tools로 GLB 변환 후 다시 실행하세요."
+                );
+            }
+            StageStatus::Invalid => {
+                eprintln!(
+                    "warning: selected stage '{}' is invalid (no renderable assets). continuing without stage.",
+                    stage_choice.name
+                );
+            }
+        }
+    }
     let animation_index = resolve_animation_index(&scene, args.anim.as_deref())?;
     let clip_duration_secs = animation_index
         .and_then(|idx| scene.animations.get(idx))
@@ -460,10 +610,16 @@ fn start(args: StartArgs) -> Result<()> {
             camera_focus: selection.camera_focus,
             material_color: selection.material_color,
             texture_sampling: selection.texture_sampling,
+            clarity_profile: selection.clarity_profile,
+            ansi_quantization: selection.ansi_quantization,
+            model_lift: selection.model_lift,
+            edge_accent_strength: selection.edge_accent_strength,
+            bg_suppression: visual.bg_suppression,
             braille_aspect_compensation: selection.braille_aspect_compensation,
             stage_level: selection.stage_level,
             stage_reactive: selection.stage_reactive,
             color_mode: Some(selection.color_mode),
+            ascii_force_color: visual.ascii_force_color,
             braille_profile: selection.braille_profile,
             theme_style: selection.theme_style,
             audio_reactive: selection.audio_reactive,
@@ -475,7 +631,8 @@ fn start(args: StartArgs) -> Result<()> {
     config.perf_profile = selection.perf_profile;
     config.detail_profile = selection.detail_profile;
     config.backend = selection.backend;
-    config.color_mode = selection.color_mode;
+    config.color_mode =
+        resolve_effective_color_mode(config.mode, selection.color_mode, config.ascii_force_color);
     config.braille_profile = selection.braille_profile;
     config.theme_style = selection.theme_style;
     config.audio_reactive = selection.audio_reactive;
@@ -490,8 +647,12 @@ fn start(args: StartArgs) -> Result<()> {
     config.stage_reactive = selection.stage_reactive;
     config.material_color = selection.material_color;
     config.texture_sampling = selection.texture_sampling;
+    config.clarity_profile = selection.clarity_profile;
+    config.ansi_quantization = selection.ansi_quantization;
+    config.model_lift = selection.model_lift;
+    config.edge_accent_strength = selection.edge_accent_strength;
     config.braille_aspect_compensation = selection.braille_aspect_compensation;
-    apply_runtime_render_tuning(&mut config, runtime_cfg);
+    apply_runtime_render_tuning(&mut config, &runtime_cfg);
     run_scene_interactive(
         scene,
         animation_index,
@@ -508,11 +669,48 @@ fn start(args: StartArgs) -> Result<()> {
 
 fn run_interactive(args: RunArgs) -> Result<()> {
     let runtime_cfg = load_runtime_config();
-    let visual = resolve_visual_options_for_run(&args, runtime_cfg);
-    let sync = resolve_sync_options_for_run(&args, runtime_cfg);
-    let (scene, animation_index, rotates_without_animation) = load_scene_for_run(&args)?;
+    let visual = resolve_visual_options_for_run(&args, &runtime_cfg);
+    let sync = resolve_sync_options_for_run(&args, &runtime_cfg);
+    let (mut scene, animation_index, rotates_without_animation) = load_scene_for_run(&args)?;
+    let stage_dir = resolved_stage_dir(&args.stage_dir, &runtime_cfg);
+    let stage_selector = resolved_stage_selector(args.stage.as_deref(), &runtime_cfg);
+    let stage_entries = discover_stage_sets(&stage_dir);
+    if let Some(stage_choice) = resolve_stage_choice_from_selector(&stage_entries, &stage_selector)
+    {
+        match stage_choice.status {
+            StageStatus::Ready => {
+                if let Some(path) = stage_choice.render_path.as_deref() {
+                    match load_scene_file(path) {
+                        Ok(mut stage_scene) => {
+                            apply_stage_transform(&mut stage_scene, stage_choice.transform);
+                            scene = merge_scenes(scene, stage_scene);
+                        }
+                        Err(err) => {
+                            eprintln!("warning: failed to load stage {}: {err}", path.display());
+                        }
+                    }
+                }
+            }
+            StageStatus::NeedsConvert => {
+                let pmx = stage_choice
+                    .pmx_path
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| stage_choice.name.clone());
+                bail!(
+                    "selected stage requires PMX conversion before runtime: {pmx}\nConvert to GLB and retry."
+                );
+            }
+            StageStatus::Invalid => {
+                eprintln!(
+                    "warning: selected stage '{}' is invalid. running without stage.",
+                    stage_choice.name
+                );
+            }
+        }
+    }
     let mut config = render_config_from_run(&args, visual);
-    apply_runtime_render_tuning(&mut config, runtime_cfg);
+    apply_runtime_render_tuning(&mut config, &runtime_cfg);
     run_scene_interactive(
         scene,
         animation_index,
@@ -545,10 +743,16 @@ struct ResolvedVisualOptions {
     camera_focus: CameraFocusMode,
     material_color: bool,
     texture_sampling: TextureSamplingMode,
+    clarity_profile: ClarityProfile,
+    ansi_quantization: AnsiQuantization,
+    model_lift: f32,
+    edge_accent_strength: f32,
+    bg_suppression: f32,
     braille_aspect_compensation: f32,
     stage_level: u8,
     stage_reactive: bool,
     color_mode: Option<ColorMode>,
+    ascii_force_color: bool,
     braille_profile: BrailleProfile,
     theme_style: ThemeStyle,
     audio_reactive: AudioReactiveMode,
@@ -564,7 +768,7 @@ struct ResolvedSyncOptions {
 
 fn resolve_visual_options_for_start(
     args: &StartArgs,
-    runtime_cfg: GasciiConfig,
+    runtime_cfg: &GasciiConfig,
 ) -> ResolvedVisualOptions {
     ResolvedVisualOptions {
         cell_aspect_mode: args
@@ -612,10 +816,31 @@ fn resolve_visual_options_for_start(
             .texture_sampling
             .map(Into::into)
             .unwrap_or(runtime_cfg.texture_sampling),
+        clarity_profile: args
+            .clarity_profile
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.clarity_profile),
+        ansi_quantization: args
+            .ansi_quantization
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.ansi_quantization),
+        model_lift: args
+            .model_lift
+            .unwrap_or(runtime_cfg.model_lift)
+            .clamp(0.02, 0.45),
+        edge_accent_strength: args
+            .edge_accent_strength
+            .unwrap_or(runtime_cfg.edge_accent_strength)
+            .clamp(0.0, 1.5),
+        bg_suppression: runtime_cfg.bg_suppression.clamp(0.0, 1.0),
         braille_aspect_compensation: runtime_cfg.braille_aspect_compensation,
         stage_level: args.stage_level.unwrap_or(runtime_cfg.stage_level).min(4),
         stage_reactive: runtime_cfg.stage_reactive,
         color_mode: args.color_mode.map(Into::into).or(runtime_cfg.color_mode),
+        ascii_force_color: args
+            .ascii_force_color
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.ascii_force_color),
         braille_profile: args
             .braille_profile
             .map(Into::into)
@@ -641,7 +866,7 @@ fn resolve_visual_options_for_start(
 
 fn resolve_visual_options_for_run(
     args: &RunArgs,
-    runtime_cfg: GasciiConfig,
+    runtime_cfg: &GasciiConfig,
 ) -> ResolvedVisualOptions {
     ResolvedVisualOptions {
         cell_aspect_mode: args
@@ -689,10 +914,31 @@ fn resolve_visual_options_for_run(
             .texture_sampling
             .map(Into::into)
             .unwrap_or(runtime_cfg.texture_sampling),
+        clarity_profile: args
+            .clarity_profile
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.clarity_profile),
+        ansi_quantization: args
+            .ansi_quantization
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.ansi_quantization),
+        model_lift: args
+            .model_lift
+            .unwrap_or(runtime_cfg.model_lift)
+            .clamp(0.02, 0.45),
+        edge_accent_strength: args
+            .edge_accent_strength
+            .unwrap_or(runtime_cfg.edge_accent_strength)
+            .clamp(0.0, 1.5),
+        bg_suppression: runtime_cfg.bg_suppression.clamp(0.0, 1.0),
         braille_aspect_compensation: runtime_cfg.braille_aspect_compensation,
         stage_level: args.stage_level.unwrap_or(runtime_cfg.stage_level).min(4),
         stage_reactive: runtime_cfg.stage_reactive,
         color_mode: args.color_mode.map(Into::into).or(runtime_cfg.color_mode),
+        ascii_force_color: args
+            .ascii_force_color
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.ascii_force_color),
         braille_profile: args
             .braille_profile
             .map(Into::into)
@@ -718,7 +964,7 @@ fn resolve_visual_options_for_run(
 
 fn resolve_visual_options_for_bench(
     args: &BenchArgs,
-    runtime_cfg: GasciiConfig,
+    runtime_cfg: &GasciiConfig,
 ) -> ResolvedVisualOptions {
     ResolvedVisualOptions {
         cell_aspect_mode: args
@@ -766,10 +1012,31 @@ fn resolve_visual_options_for_bench(
             .texture_sampling
             .map(Into::into)
             .unwrap_or(runtime_cfg.texture_sampling),
+        clarity_profile: args
+            .clarity_profile
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.clarity_profile),
+        ansi_quantization: args
+            .ansi_quantization
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.ansi_quantization),
+        model_lift: args
+            .model_lift
+            .unwrap_or(runtime_cfg.model_lift)
+            .clamp(0.02, 0.45),
+        edge_accent_strength: args
+            .edge_accent_strength
+            .unwrap_or(runtime_cfg.edge_accent_strength)
+            .clamp(0.0, 1.5),
+        bg_suppression: runtime_cfg.bg_suppression.clamp(0.0, 1.0),
         braille_aspect_compensation: runtime_cfg.braille_aspect_compensation,
         stage_level: args.stage_level.unwrap_or(runtime_cfg.stage_level).min(4),
         stage_reactive: runtime_cfg.stage_reactive,
         color_mode: args.color_mode.map(Into::into).or(runtime_cfg.color_mode),
+        ascii_force_color: args
+            .ascii_force_color
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.ascii_force_color),
         braille_profile: args
             .braille_profile
             .map(Into::into)
@@ -795,7 +1062,7 @@ fn resolve_visual_options_for_bench(
 
 fn resolve_sync_options_for_start(
     args: &StartArgs,
-    runtime_cfg: GasciiConfig,
+    runtime_cfg: &GasciiConfig,
 ) -> ResolvedSyncOptions {
     ResolvedSyncOptions {
         sync_offset_ms: args
@@ -809,7 +1076,7 @@ fn resolve_sync_options_for_start(
     }
 }
 
-fn resolve_sync_options_for_run(args: &RunArgs, runtime_cfg: GasciiConfig) -> ResolvedSyncOptions {
+fn resolve_sync_options_for_run(args: &RunArgs, runtime_cfg: &GasciiConfig) -> ResolvedSyncOptions {
     ResolvedSyncOptions {
         sync_offset_ms: args
             .sync_offset_ms
@@ -829,7 +1096,29 @@ fn default_color_mode_for_mode(mode: RenderMode) -> ColorMode {
     }
 }
 
-fn apply_runtime_render_tuning(config: &mut RenderConfig, runtime_cfg: GasciiConfig) {
+fn resolve_effective_color_mode(
+    mode: RenderMode,
+    requested: ColorMode,
+    ascii_force_color: bool,
+) -> ColorMode {
+    if matches!(mode, RenderMode::Ascii) && ascii_force_color {
+        ColorMode::Ansi
+    } else {
+        requested
+    }
+}
+
+fn color_path_label(color_mode: ColorMode, quantization: AnsiQuantization) -> &'static str {
+    match color_mode {
+        ColorMode::Mono => "mono",
+        ColorMode::Ansi => match quantization {
+            AnsiQuantization::Q216 => "ansi-q216",
+            AnsiQuantization::Off => "ansi-truecolor",
+        },
+    }
+}
+
+fn apply_runtime_render_tuning(config: &mut RenderConfig, runtime_cfg: &GasciiConfig) {
     config.triangle_stride = runtime_cfg.triangle_stride.max(1);
     config.min_triangle_area_px2 = runtime_cfg.min_triangle_area_px2.max(0.0);
     config.braille_aspect_compensation = runtime_cfg.braille_aspect_compensation;
@@ -979,11 +1268,7 @@ fn run_scene_interactive(
     look_at_y: f32,
 ) -> Result<()> {
     config.backend = resolve_runtime_backend(config.backend);
-    let truecolor_supported = supports_truecolor();
-    if matches!(config.color_mode, ColorMode::Ansi) && !truecolor_supported {
-        eprintln!("warning: truecolor is unavailable in this terminal. fallback to mono mode.");
-        config.color_mode = ColorMode::Mono;
-    }
+    let _truecolor_supported = supports_truecolor();
     let mut terminal = TerminalSession::enter()?;
     terminal.set_present_mode(PresentMode::Diff);
     let (term_width, term_height) = validated_terminal_size(&terminal)?;
@@ -1013,13 +1298,16 @@ fn run_scene_interactive(
     };
     let mut orbit_state = OrbitState::new(orbit_speed);
     let mut model_spin_enabled = rotates_without_animation;
-    let mut zoom = 1.0_f32;
+    let mut user_zoom = 1.0_f32;
     let mut focus_offset = Vec3::ZERO;
     let mut camera_height_offset = 0.0_f32;
     let mut center_lock_enabled = config.center_lock;
     let center_lock_mode = config.center_lock_mode;
     let mut stage_level = config.stage_level.min(4);
-    let mut color_mode = config.color_mode;
+    let mut color_mode =
+        resolve_effective_color_mode(config.mode, config.color_mode, config.ascii_force_color);
+    let mut ascii_force_color_active = config.ascii_force_color;
+    let mut ansi_quantization = config.ansi_quantization;
     let mut braille_profile = config.braille_profile;
     let mut cinematic_mode = config.cinematic_camera;
     let camera_focus_mode = config.camera_focus;
@@ -1034,12 +1322,15 @@ fn run_scene_interactive(
     let mut visibility_watchdog = VisibilityWatchdog::default();
     let mut center_lock_state = CenterLockState::default();
     let mut auto_radius_guard = AutoRadiusGuard::default();
+    let mut screen_fit = ScreenFitController::default();
+    let mut exposure_auto_boost = ExposureAutoBoost::default();
     let base_triangle_stride = config.triangle_stride.max(1);
     let base_min_triangle_area_px2 = config.min_triangle_area_px2.max(0.0);
     let mut io_failure_count: u8 = 0;
     let mut last_osd_notice: Option<String> = None;
     let mut osd_until: Option<Instant> = Some(Instant::now() + Duration::from_secs(2));
     let mut last_render_stats = RenderStats::default();
+    let mut effective_aspect_state = resolve_cell_aspect(&config, detect_terminal_cell_aspect());
     if scaled {
         osd_until = Some(Instant::now() + Duration::from_secs(3));
     }
@@ -1065,7 +1356,7 @@ fn run_scene_interactive(
             &mut orbit_state.enabled,
             &mut orbit_state.speed,
             &mut model_spin_enabled,
-            &mut zoom,
+            &mut user_zoom,
             &mut focus_offset,
             &mut camera_height_offset,
             &mut center_lock_enabled,
@@ -1084,6 +1375,10 @@ fn run_scene_interactive(
         if input.resized {
             terminal.force_full_repaint();
             center_lock_state.reset();
+            screen_fit.on_resize();
+            exposure_auto_boost.on_resize();
+            last_render_stats = RenderStats::default();
+            render_scratch.reset_exposure();
             last_osd_notice = Some(format!("resize: {}x{}", frame.width, frame.height));
             osd_until = Some(Instant::now() + Duration::from_secs(2));
         }
@@ -1097,6 +1392,16 @@ fn run_scene_interactive(
         if input.center_lock_blocked_pan {
             last_osd_notice = Some("center-lock on: pan disabled (press f to unlock)".to_owned());
             osd_until = Some(Instant::now() + Duration::from_secs(2));
+        }
+        if input.zoom_changed {
+            screen_fit.on_manual_zoom();
+        }
+        if matches!(config.mode, RenderMode::Ascii) && ascii_force_color_active {
+            if input.last_key == Some("n") {
+                last_osd_notice = Some("ascii color is forced: ansi".to_owned());
+                osd_until = Some(Instant::now() + Duration::from_secs(2));
+            }
+            color_mode = ColorMode::Ansi;
         }
 
         let elapsed_wall = start.elapsed().as_secs_f32();
@@ -1139,25 +1444,23 @@ fn run_scene_interactive(
         } else {
             0.0
         };
-        let detected_cell_aspect = detect_terminal_cell_aspect();
-        let effective_aspect = resolve_cell_aspect(
-            &config,
-            if config.cell_aspect_mode == CellAspectMode::Auto {
-                detected_cell_aspect
-            } else {
-                None
-            },
-        );
+        let detected_cell_aspect = if config.cell_aspect_mode == CellAspectMode::Auto {
+            detect_terminal_cell_aspect()
+        } else {
+            None
+        };
+        let target_aspect = resolve_cell_aspect(&config, detected_cell_aspect);
+        effective_aspect_state += (target_aspect - effective_aspect_state) * 0.22;
+        let effective_aspect = effective_aspect_state.clamp(0.30, 1.20);
         let mut frame_config = config.clone();
-        if matches!(color_mode, ColorMode::Ansi) && !truecolor_supported {
-            color_mode = ColorMode::Mono;
-        }
         frame_config.cell_aspect_mode = CellAspectMode::Manual;
         frame_config.cell_aspect = effective_aspect;
         frame_config.center_lock = center_lock_enabled;
         frame_config.center_lock_mode = center_lock_mode;
         frame_config.stage_level = stage_level.min(4);
-        frame_config.color_mode = color_mode;
+        frame_config.color_mode =
+            resolve_effective_color_mode(frame_config.mode, color_mode, ascii_force_color_active);
+        frame_config.ansi_quantization = ansi_quantization;
         frame_config.braille_profile = braille_profile;
         frame_config.cinematic_camera = cinematic_mode;
         frame_config.camera_focus = camera_focus_mode;
@@ -1180,7 +1483,7 @@ fn run_scene_interactive(
             frame_config.fog_scale =
                 (frame_config.fog_scale * (1.0 - reactive_amount * 0.18)).clamp(0.30, 1.5);
         }
-        frame_config.exposure_bias = exposure_bias;
+        frame_config.exposure_bias = (exposure_bias + exposure_auto_boost.boost).clamp(-0.5, 0.8);
 
         apply_adaptive_quality_tuning(
             &mut frame_config,
@@ -1200,13 +1503,14 @@ fn run_scene_interactive(
             extent_y,
             jitter_scale,
         );
+        let effective_zoom = (user_zoom * screen_fit.auto_zoom_gain).clamp(0.20, 8.0);
         let dynamic_center_offset = if center_lock_enabled {
             center_lock_state.update(
                 &last_render_stats,
                 center_lock_mode,
                 frame.width,
                 frame.height,
-                framing.radius * zoom * radius_mul,
+                framing.radius * effective_zoom * radius_mul,
                 extent_y,
             )
         } else {
@@ -1217,7 +1521,8 @@ fn run_scene_interactive(
         let auto_radius_shrink = auto_radius_guard.shrink_ratio;
         let camera = orbit_camera(
             orbit_state.angle + angle_jitter,
-            (framing.radius * zoom * radius_mul * (1.0 - auto_radius_shrink)).clamp(0.2, 1000.0),
+            (framing.radius * effective_zoom * radius_mul * (1.0 - auto_radius_shrink))
+                .clamp(0.2, 1000.0),
             (framing.camera_height + camera_height_offset + height_off).clamp(-1000.0, 1000.0),
             framing.focus
                 + dynamic_center_offset
@@ -1253,15 +1558,23 @@ fn run_scene_interactive(
             stats.visible_height_ratio,
             center_lock_enabled && matches!(braille_profile, BrailleProfile::Safe),
         );
+        screen_fit.update(
+            stats.visible_height_ratio,
+            frame_config.mode,
+            center_lock_enabled,
+        );
+        exposure_auto_boost.update(stats.visible_cell_ratio);
 
         if visibility_watchdog.observe(stats.visible_cell_ratio) {
             visibility_watchdog.reset();
-            zoom = 1.0;
+            user_zoom = 1.0;
             focus_offset = Vec3::ZERO;
             camera_height_offset = 0.0;
             exposure_bias = (exposure_bias + 0.08).clamp(-0.5, 0.8);
             center_lock_state.reset();
             auto_radius_guard = AutoRadiusGuard::default();
+            screen_fit.on_resize();
+            exposure_auto_boost.on_resize();
             camera_director = CameraDirectorState::default();
             cinematic_mode = CinematicCameraMode::On;
             last_osd_notice = Some("visibility recover".to_owned());
@@ -1301,18 +1614,33 @@ fn run_scene_interactive(
         }
 
         let present_result = if matches!(frame_config.color_mode, ColorMode::Ansi) {
-            terminal.present(&frame, true)
+            terminal.present(&frame, true, ansi_quantization)
         } else {
-            terminal.present(&frame, false)
+            terminal.present(&frame, false, ansi_quantization)
         };
         if let Err(err) = present_result {
             if is_retryable_io_error(&err) {
                 io_failure_count = io_failure_count.saturating_add(1);
                 if io_failure_count >= 3 {
                     io_failure_count = 0;
-                    color_mode = ColorMode::Mono;
+                    if matches!(frame_config.color_mode, ColorMode::Ansi) {
+                        if matches!(ansi_quantization, AnsiQuantization::Off) {
+                            ansi_quantization = AnsiQuantization::Q216;
+                            last_osd_notice = Some(format!(
+                                "io fallback: {}",
+                                color_path_label(color_mode, ansi_quantization)
+                            ));
+                            osd_until = Some(Instant::now() + Duration::from_secs(2));
+                            continue;
+                        }
+                        color_mode = ColorMode::Mono;
+                        ascii_force_color_active = false;
+                    }
                     terminal.set_present_mode(PresentMode::FullFallback);
-                    last_osd_notice = Some("io fallback: mono/full".to_owned());
+                    last_osd_notice = Some(format!(
+                        "io fallback: {}",
+                        color_path_label(color_mode, ansi_quantization)
+                    ));
                     osd_until = Some(Instant::now() + Duration::from_secs(3));
                 }
                 continue;
@@ -1320,9 +1648,24 @@ fn run_scene_interactive(
             io_failure_count = io_failure_count.saturating_add(1);
             if io_failure_count >= 3 {
                 io_failure_count = 0;
-                color_mode = ColorMode::Mono;
+                if matches!(frame_config.color_mode, ColorMode::Ansi) {
+                    if matches!(ansi_quantization, AnsiQuantization::Off) {
+                        ansi_quantization = AnsiQuantization::Q216;
+                        last_osd_notice = Some(format!(
+                            "error fallback: {}",
+                            color_path_label(color_mode, ansi_quantization)
+                        ));
+                        osd_until = Some(Instant::now() + Duration::from_secs(2));
+                        continue;
+                    }
+                    color_mode = ColorMode::Mono;
+                    ascii_force_color_active = false;
+                }
                 terminal.set_present_mode(PresentMode::FullFallback);
-                last_osd_notice = Some("error fallback: mono/full".to_owned());
+                last_osd_notice = Some(format!(
+                    "error fallback: {}",
+                    color_path_label(color_mode, ansi_quantization)
+                ));
                 osd_until = Some(Instant::now() + Duration::from_secs(3));
                 continue;
             }
@@ -1442,23 +1785,11 @@ fn scene_stats_world(scene: &SceneCpu) -> Option<SceneStats> {
     let poses = default_poses(&scene.nodes);
     let globals = compute_global_matrices(&scene.nodes, &poses);
 
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    let mut points = Vec::new();
-    for instance in &scene.mesh_instances {
-        let Some(mesh) = scene.meshes.get(instance.mesh_index) else {
-            continue;
-        };
-        let node_global = globals
-            .get(instance.node_index)
-            .copied()
-            .unwrap_or(glam::Mat4::IDENTITY);
-        for position in &mesh.positions {
-            let p = node_global.transform_point3(*position);
-            min = min.min(p);
-            max = max.max(p);
-            points.push(p);
-        }
+    let focus_mask = focus_node_mask(scene);
+    let (mut min, mut max, mut points) =
+        collect_scene_points(scene, &globals, focus_mask.as_deref());
+    if points.is_empty() {
+        (min, max, points) = collect_scene_points(scene, &globals, None);
     }
     if points.is_empty() {
         return None;
@@ -1522,6 +1853,56 @@ fn scene_stats_world(scene: &SceneCpu) -> Option<SceneStats> {
     })
 }
 
+fn focus_node_mask(scene: &SceneCpu) -> Option<Vec<bool>> {
+    let root = scene.root_center_node?;
+    if root >= scene.nodes.len() {
+        return None;
+    }
+    let mut mask = vec![false; scene.nodes.len()];
+    let mut stack = vec![root];
+    while let Some(node_index) = stack.pop() {
+        if node_index >= scene.nodes.len() || mask[node_index] {
+            continue;
+        }
+        mask[node_index] = true;
+        stack.extend(scene.nodes[node_index].children.iter().copied());
+    }
+    Some(mask)
+}
+
+fn collect_scene_points(
+    scene: &SceneCpu,
+    globals: &[glam::Mat4],
+    focus_mask: Option<&[bool]>,
+) -> (Vec3, Vec3, Vec<Vec3>) {
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    let mut points = Vec::new();
+    for instance in &scene.mesh_instances {
+        if focus_mask
+            .and_then(|mask| mask.get(instance.node_index))
+            .copied()
+            == Some(false)
+        {
+            continue;
+        }
+        let Some(mesh) = scene.meshes.get(instance.mesh_index) else {
+            continue;
+        };
+        let node_global = globals
+            .get(instance.node_index)
+            .copied()
+            .unwrap_or(glam::Mat4::IDENTITY);
+        for position in &mesh.positions {
+            let p = node_global.transform_point3(*position);
+            min = min.min(p);
+            max = max.max(p);
+            points.push(p);
+        }
+    }
+    (min, max, points)
+}
+
 fn quantile_sorted(sorted: &[f32], q: f32) -> f32 {
     if sorted.is_empty() {
         return 0.0;
@@ -1539,9 +1920,13 @@ fn quantile_sorted(sorted: &[f32], q: f32) -> f32 {
 
 fn render_config_from_run(args: &RunArgs, visual: ResolvedVisualOptions) -> RenderConfig {
     let mode: RenderMode = args.mode.into();
-    let color_mode = visual
-        .color_mode
-        .unwrap_or_else(|| default_color_mode_for_mode(mode));
+    let color_mode = resolve_effective_color_mode(
+        mode,
+        visual
+            .color_mode
+            .unwrap_or_else(|| default_color_mode_for_mode(mode)),
+        visual.ascii_force_color,
+    );
     RenderConfig {
         fov_deg: args.fov_deg,
         near: args.near,
@@ -1551,6 +1936,7 @@ fn render_config_from_run(args: &RunArgs, visual: ResolvedVisualOptions) -> Rend
         detail_profile: visual.detail_profile,
         backend: visual.backend,
         color_mode,
+        ascii_force_color: visual.ascii_force_color,
         braille_profile: visual.braille_profile,
         theme_style: visual.theme_style,
         audio_reactive: visual.audio_reactive,
@@ -1565,6 +1951,11 @@ fn render_config_from_run(args: &RunArgs, visual: ResolvedVisualOptions) -> Rend
         stage_reactive: visual.stage_reactive,
         material_color: visual.material_color,
         texture_sampling: visual.texture_sampling,
+        clarity_profile: visual.clarity_profile,
+        ansi_quantization: visual.ansi_quantization,
+        model_lift: visual.model_lift,
+        edge_accent_strength: visual.edge_accent_strength,
+        bg_suppression: visual.bg_suppression,
         braille_aspect_compensation: visual.braille_aspect_compensation,
         charset: args.charset.clone(),
         cell_aspect: args.cell_aspect,
@@ -1589,9 +1980,13 @@ fn render_config_from_run(args: &RunArgs, visual: ResolvedVisualOptions) -> Rend
 
 fn render_config_from_start(args: &StartArgs, visual: ResolvedVisualOptions) -> RenderConfig {
     let mode: RenderMode = args.mode.into();
-    let color_mode = visual
-        .color_mode
-        .unwrap_or_else(|| default_color_mode_for_mode(mode));
+    let color_mode = resolve_effective_color_mode(
+        mode,
+        visual
+            .color_mode
+            .unwrap_or_else(|| default_color_mode_for_mode(mode)),
+        visual.ascii_force_color,
+    );
     RenderConfig {
         fov_deg: args.fov_deg,
         near: args.near,
@@ -1601,6 +1996,7 @@ fn render_config_from_start(args: &StartArgs, visual: ResolvedVisualOptions) -> 
         detail_profile: visual.detail_profile,
         backend: visual.backend,
         color_mode,
+        ascii_force_color: visual.ascii_force_color,
         braille_profile: visual.braille_profile,
         theme_style: visual.theme_style,
         audio_reactive: visual.audio_reactive,
@@ -1615,6 +2011,11 @@ fn render_config_from_start(args: &StartArgs, visual: ResolvedVisualOptions) -> 
         stage_reactive: visual.stage_reactive,
         material_color: visual.material_color,
         texture_sampling: visual.texture_sampling,
+        clarity_profile: visual.clarity_profile,
+        ansi_quantization: visual.ansi_quantization,
+        model_lift: visual.model_lift,
+        edge_accent_strength: visual.edge_accent_strength,
+        bg_suppression: visual.bg_suppression,
         braille_aspect_compensation: visual.braille_aspect_compensation,
         charset: args.charset.clone(),
         cell_aspect: args.cell_aspect,
@@ -1680,6 +2081,308 @@ fn discover_music_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn resolved_stage_dir(cli_stage_dir: &Path, runtime_cfg: &GasciiConfig) -> PathBuf {
+    let cli_default = Path::new("assets/stage");
+    if cli_stage_dir == cli_default && runtime_cfg.stage_dir != cli_default {
+        runtime_cfg.stage_dir.clone()
+    } else {
+        cli_stage_dir.to_path_buf()
+    }
+}
+
+fn discover_stage_sets(root: &Path) -> Vec<StageChoice> {
+    if !root.exists() || !root.is_dir() {
+        return Vec::new();
+    }
+    let mut dirs = fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    dirs.sort();
+
+    let mut stages = Vec::new();
+    for dir in dirs {
+        let mut renderable_files = Vec::new();
+        let mut pmx_files = Vec::new();
+        discover_stage_files_recursive(&dir, &mut renderable_files, &mut pmx_files);
+        renderable_files.sort();
+        pmx_files.sort();
+
+        let status = if !renderable_files.is_empty() {
+            StageStatus::Ready
+        } else if !pmx_files.is_empty() {
+            StageStatus::NeedsConvert
+        } else {
+            StageStatus::Invalid
+        };
+        let transform = load_stage_transform(&dir.join("stage.meta.toml"));
+        stages.push(StageChoice {
+            name: dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("<invalid>")
+                .to_owned(),
+            status,
+            render_path: renderable_files.first().cloned(),
+            pmx_path: pmx_files.first().cloned(),
+            transform,
+        });
+    }
+    stages
+}
+
+fn resolved_stage_selector(cli_stage: Option<&str>, runtime_cfg: &GasciiConfig) -> String {
+    cli_stage
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| runtime_cfg.stage_selection.clone())
+}
+
+fn resolve_stage_choice_from_selector(
+    entries: &[StageChoice],
+    selector: &str,
+) -> Option<StageChoice> {
+    let trimmed = selector.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("auto")
+        || trimmed.eq_ignore_ascii_case("default")
+    {
+        return entries
+            .iter()
+            .find(|entry| matches!(entry.status, StageStatus::Ready))
+            .cloned();
+    }
+    if trimmed.eq_ignore_ascii_case("none")
+        || trimmed.eq_ignore_ascii_case("off")
+        || trimmed == "없음"
+    {
+        return None;
+    }
+
+    let selector_path = Path::new(trimmed);
+    if selector_path.exists() {
+        if selector_path.is_dir() {
+            if let Some(dir_name) = selector_path.file_name().and_then(|n| n.to_str()) {
+                if let Some(found) = entries
+                    .iter()
+                    .find(|entry| entry.name.eq_ignore_ascii_case(dir_name))
+                {
+                    return Some(found.clone());
+                }
+            }
+        }
+        let selector_abs = selector_path
+            .canonicalize()
+            .unwrap_or_else(|_| selector_path.to_path_buf());
+        if let Some(found) = entries.iter().find(|entry| {
+            entry
+                .render_path
+                .as_ref()
+                .and_then(|p| p.canonicalize().ok())
+                .is_some_and(|p| p == selector_abs)
+        }) {
+            return Some(found.clone());
+        }
+    }
+
+    entries
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(trimmed))
+        .cloned()
+}
+
+fn discover_stage_files_recursive(
+    root: &Path,
+    renderable_files: &mut Vec<PathBuf>,
+    pmx_files: &mut Vec<PathBuf>,
+) {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_ascii_lowercase());
+            match ext.as_deref() {
+                Some("glb" | "gltf" | "obj") => renderable_files.push(path),
+                Some("pmx") => pmx_files.push(path),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn load_stage_transform(path: &Path) -> StageTransform {
+    let Ok(content) = fs::read_to_string(path) else {
+        return StageTransform::default();
+    };
+    let mut transform = StageTransform::default();
+    for raw_line in content.lines() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((raw_key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = raw_key
+            .trim()
+            .to_ascii_lowercase()
+            .replace('-', "_")
+            .replace(' ', "_");
+        let value = raw_value.trim();
+        match key.as_str() {
+            "offset" => {
+                if let Some(v) = parse_meta_vec3(value) {
+                    transform.offset = v;
+                }
+            }
+            "rot" | "rotation" | "rotation_deg" => {
+                if let Some(v) = parse_meta_vec3(value) {
+                    transform.rotation_deg = v;
+                }
+            }
+            "scale" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    transform.scale = parsed.clamp(0.01, 100.0);
+                }
+            }
+            _ => {}
+        }
+    }
+    transform
+}
+
+fn parse_meta_vec3(value: &str) -> Option<[f32; 3]> {
+    let trimmed = value.trim();
+    let body = trimmed
+        .strip_prefix('[')
+        .and_then(|v| v.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    let parts = body
+        .split(',')
+        .map(|p| p.trim().parse::<f32>().ok())
+        .collect::<Vec<_>>();
+    if parts.len() < 3 {
+        return None;
+    }
+    Some([parts[0]?, parts[1]?, parts[2]?])
+}
+
+fn apply_stage_transform(scene: &mut SceneCpu, transform: StageTransform) {
+    if scene.nodes.is_empty() {
+        return;
+    }
+    let rotation = Quat::from_euler(
+        glam::EulerRot::XYZ,
+        transform.rotation_deg[0].to_radians(),
+        transform.rotation_deg[1].to_radians(),
+        transform.rotation_deg[2].to_radians(),
+    );
+    let root_index = scene.nodes.len();
+    let mut children = Vec::new();
+    for (index, node) in scene.nodes.iter_mut().enumerate() {
+        if node.parent.is_none() {
+            node.parent = Some(root_index);
+            children.push(index);
+        }
+    }
+    scene.nodes.push(Node {
+        name: Some("StageTransformRoot".to_owned()),
+        parent: None,
+        children,
+        base_translation: Vec3::new(
+            transform.offset[0],
+            transform.offset[1],
+            transform.offset[2],
+        ),
+        base_rotation: rotation,
+        base_scale: Vec3::splat(transform.scale),
+    });
+}
+
+fn load_scene_file(path: &Path) -> Result<SceneCpu> {
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "glb" | "gltf" => loader::load_gltf(path),
+        "obj" => loader::load_obj(path),
+        other => bail!(
+            "unsupported scene file extension for runtime merge: {} ({other})",
+            path.display()
+        ),
+    }
+}
+
+fn merge_scenes(mut base: SceneCpu, mut overlay: SceneCpu) -> SceneCpu {
+    let texture_offset = base.textures.len();
+    base.textures.append(&mut overlay.textures);
+
+    let material_offset = base.materials.len();
+    for material in &mut overlay.materials {
+        material.base_color_texture = material.base_color_texture.map(|idx| idx + texture_offset);
+    }
+    base.materials.append(&mut overlay.materials);
+
+    let mesh_offset = base.meshes.len();
+    for mesh in &mut overlay.meshes {
+        mesh.material_index = mesh.material_index.map(|idx| idx + material_offset);
+    }
+    base.meshes.append(&mut overlay.meshes);
+
+    let node_offset = base.nodes.len();
+    for node in &mut overlay.nodes {
+        node.parent = node.parent.map(|idx| idx + node_offset);
+        for child in &mut node.children {
+            *child += node_offset;
+        }
+    }
+    let overlay_root = overlay.root_center_node.map(|idx| idx + node_offset);
+    base.nodes.append(&mut overlay.nodes);
+
+    let skin_offset = base.skins.len();
+    for skin in &mut overlay.skins {
+        for joint in &mut skin.joints {
+            *joint += node_offset;
+        }
+    }
+    base.skins.append(&mut overlay.skins);
+
+    for instance in &mut overlay.mesh_instances {
+        instance.mesh_index += mesh_offset;
+        instance.node_index += node_offset;
+        instance.skin_index = instance.skin_index.map(|idx| idx + skin_offset);
+    }
+    base.mesh_instances.append(&mut overlay.mesh_instances);
+
+    for clip in &mut overlay.animations {
+        for channel in &mut clip.channels {
+            channel.node_index += node_offset;
+        }
+    }
+    base.animations.append(&mut overlay.animations);
+
+    if base.root_center_node.is_none() {
+        base.root_center_node = overlay_root;
+    }
+    base
+}
+
 fn validated_terminal_size(terminal: &TerminalSession) -> Result<(u16, u16)> {
     let (w, h) = terminal.size()?;
     if w > 0 && h > 0 {
@@ -1701,7 +2404,7 @@ fn validated_terminal_size(terminal: &TerminalSession) -> Result<(u16, u16)> {
     }
 }
 
-fn apply_startup_font_config(runtime_cfg: GasciiConfig) {
+fn apply_startup_font_config(runtime_cfg: &GasciiConfig) {
     if runtime_cfg.font_preset_enabled {
         run_ghostty_font_shortcut("0");
     }
@@ -2055,8 +2758,14 @@ fn process_runtime_input(
                     result.status_changed = true;
                     result.last_key = Some("z");
                 }
-                KeyCode::Char('[') => *zoom = (*zoom + 0.08).clamp(0.2, 8.0),
-                KeyCode::Char(']') => *zoom = (*zoom - 0.08).clamp(0.2, 8.0),
+                KeyCode::Char('[') => {
+                    *zoom = (*zoom + 0.08).clamp(0.2, 8.0);
+                    result.zoom_changed = true;
+                }
+                KeyCode::Char(']') => {
+                    *zoom = (*zoom - 0.08).clamp(0.2, 8.0);
+                    result.zoom_changed = true;
+                }
                 KeyCode::Left | KeyCode::Char('j') | KeyCode::Char('J') => {
                     if *center_lock_enabled {
                         result.center_lock_blocked_pan = true;
@@ -2106,6 +2815,7 @@ fn process_runtime_input(
                     *focus_offset = Vec3::ZERO;
                     *camera_height_offset = 0.0;
                     result.status_changed = true;
+                    result.zoom_changed = true;
                     result.last_key = Some("c");
                 }
                 KeyCode::Char(',') => {
@@ -2182,11 +2892,15 @@ fn process_runtime_input(
 fn bench(args: BenchArgs) -> Result<()> {
     let (scene, animation_index, rotates) = load_scene_for_bench(&args)?;
     let runtime_cfg = load_runtime_config();
-    let visual = resolve_visual_options_for_bench(&args, runtime_cfg);
+    let visual = resolve_visual_options_for_bench(&args, &runtime_cfg);
     let mode: RenderMode = args.mode.into();
-    let color_mode = visual
-        .color_mode
-        .unwrap_or_else(|| default_color_mode_for_mode(mode));
+    let color_mode = resolve_effective_color_mode(
+        mode,
+        visual
+            .color_mode
+            .unwrap_or_else(|| default_color_mode_for_mode(mode)),
+        visual.ascii_force_color,
+    );
     let mut config = RenderConfig {
         fov_deg: args.fov_deg,
         near: args.near,
@@ -2196,6 +2910,7 @@ fn bench(args: BenchArgs) -> Result<()> {
         detail_profile: visual.detail_profile,
         backend: visual.backend,
         color_mode,
+        ascii_force_color: visual.ascii_force_color,
         braille_profile: visual.braille_profile,
         theme_style: visual.theme_style,
         audio_reactive: visual.audio_reactive,
@@ -2210,6 +2925,11 @@ fn bench(args: BenchArgs) -> Result<()> {
         stage_reactive: visual.stage_reactive,
         material_color: visual.material_color,
         texture_sampling: visual.texture_sampling,
+        clarity_profile: visual.clarity_profile,
+        ansi_quantization: visual.ansi_quantization,
+        model_lift: visual.model_lift,
+        edge_accent_strength: visual.edge_accent_strength,
+        bg_suppression: visual.bg_suppression,
         braille_aspect_compensation: visual.braille_aspect_compensation,
         charset: args.charset,
         cell_aspect: args.cell_aspect,
@@ -2230,7 +2950,7 @@ fn bench(args: BenchArgs) -> Result<()> {
         triangle_stride: 1,
         min_triangle_area_px2: 0.0,
     };
-    apply_runtime_render_tuning(&mut config, runtime_cfg);
+    apply_runtime_render_tuning(&mut config, &runtime_cfg);
     config.backend = resolve_runtime_backend(config.backend);
     config.cell_aspect = resolve_cell_aspect(&config, None);
     config.cell_aspect_mode = CellAspectMode::Manual;
@@ -2546,6 +3266,7 @@ fn max_scene_vertices(scene: &SceneCpu) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn auto_speed_factor_matches_reference_ratio() {
@@ -2593,6 +3314,46 @@ mod tests {
     }
 
     #[test]
+    fn ascii_force_color_overrides_requested_mono() {
+        assert!(matches!(
+            resolve_effective_color_mode(RenderMode::Ascii, ColorMode::Mono, true),
+            ColorMode::Ansi
+        ));
+        assert!(matches!(
+            resolve_effective_color_mode(RenderMode::Braille, ColorMode::Mono, true),
+            ColorMode::Mono
+        ));
+    }
+
+    #[test]
+    fn screen_fit_controller_uses_mode_specific_targets() {
+        let mut controller = ScreenFitController::default();
+        controller.update(0.40, RenderMode::Ascii, true);
+        let ascii_gain = controller.auto_zoom_gain;
+        assert!(ascii_gain > 1.0);
+
+        controller = ScreenFitController::default();
+        controller.update(0.40, RenderMode::Braille, true);
+        let braille_gain = controller.auto_zoom_gain;
+        assert!(braille_gain > 1.0);
+        assert!(ascii_gain >= braille_gain);
+    }
+
+    #[test]
+    fn exposure_auto_boost_ramps_and_recovers() {
+        let mut boost = ExposureAutoBoost::default();
+        for _ in 0..LOW_VIS_EXPOSURE_TRIGGER_FRAMES {
+            boost.update(0.001);
+        }
+        assert!(boost.boost > 0.0);
+        let boosted = boost.boost;
+        for _ in 0..LOW_VIS_EXPOSURE_RECOVER_FRAMES {
+            boost.update(0.05);
+        }
+        assert!(boost.boost < boosted);
+    }
+
+    #[test]
     fn camera_director_outputs_stable_values() {
         let mut director = CameraDirectorState::default();
         let (radius, height, focus_y, jitter) = update_camera_director(
@@ -2635,9 +3396,70 @@ mod tests {
 
     #[test]
     fn cap_render_size_applies_upper_bound() {
-        let (w, h, scaled) = cap_render_size(1000, 500);
+        let (w, h, scaled) = cap_render_size(6000, 3200);
         assert!(scaled);
         assert!(w <= MAX_RENDER_COLS);
         assert!(h <= MAX_RENDER_ROWS);
+    }
+
+    #[test]
+    fn discover_stage_sets_classifies_ready_and_convert() {
+        let dir = tempdir().expect("tempdir");
+        let stage_root = dir.path().join("assets").join("stage");
+        let ready_dir = stage_root.join("ready_stage");
+        let convert_dir = stage_root.join("pmx_stage");
+        let invalid_dir = stage_root.join("empty_stage");
+        fs::create_dir_all(&ready_dir).expect("ready dir");
+        fs::create_dir_all(&convert_dir).expect("convert dir");
+        fs::create_dir_all(&invalid_dir).expect("invalid dir");
+        fs::write(ready_dir.join("scene.glb"), b"not-a-real-glb").expect("ready file");
+        fs::write(convert_dir.join("stage.pmx"), b"pmx").expect("pmx file");
+
+        let stages = discover_stage_sets(&stage_root);
+        assert_eq!(stages.len(), 3);
+        assert!(stages.iter().any(|s| {
+            s.name == "ready_stage"
+                && matches!(s.status, StageStatus::Ready)
+                && s.render_path.is_some()
+        }));
+        assert!(stages.iter().any(|s| {
+            s.name == "pmx_stage"
+                && matches!(s.status, StageStatus::NeedsConvert)
+                && s.pmx_path.is_some()
+        }));
+        assert!(
+            stages
+                .iter()
+                .any(|s| s.name == "empty_stage" && matches!(s.status, StageStatus::Invalid))
+        );
+    }
+
+    #[test]
+    fn stage_selector_supports_auto_none_and_name() {
+        let stages = vec![
+            StageChoice {
+                name: "alpha".to_owned(),
+                status: StageStatus::NeedsConvert,
+                render_path: None,
+                pmx_path: Some(PathBuf::from("alpha/stage.pmx")),
+                transform: StageTransform::default(),
+            },
+            StageChoice {
+                name: "beta".to_owned(),
+                status: StageStatus::Ready,
+                render_path: Some(PathBuf::from("beta/stage.glb")),
+                pmx_path: None,
+                transform: StageTransform::default(),
+            },
+        ];
+
+        let auto = resolve_stage_choice_from_selector(&stages, "auto");
+        assert_eq!(auto.as_ref().map(|s| s.name.as_str()), Some("beta"));
+
+        let none = resolve_stage_choice_from_selector(&stages, "none");
+        assert!(none.is_none());
+
+        let named = resolve_stage_choice_from_selector(&stages, "beta");
+        assert_eq!(named.as_ref().map(|s| s.name.as_str()), Some("beta"));
     }
 }

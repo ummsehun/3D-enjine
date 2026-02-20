@@ -1,9 +1,9 @@
-pub mod animation;
-pub mod app;
-pub mod cli;
-pub mod loader;
-pub mod math;
-pub mod pipeline;
-pub mod renderer;
-pub mod scene;
-pub mod terminal;
+pub mod assets;
+pub mod engine;
+pub mod render;
+pub mod runtime;
+
+pub use assets::loader;
+pub use engine::{animation, math, pipeline, scene};
+pub use render::renderer;
+pub use runtime::{app, cli, terminal};

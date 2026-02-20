@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Terminal Miku 3D Preview</title>
+  <style>
+    html,body,#app{margin:0;padding:0;width:100%;height:100%;background:#111827;color:#d1d5db;font-family:ui-sans-serif,system-ui}
+    #hud{position:fixed;left:12px;top:12px;background:rgba(0,0,0,.45);padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.4}
+    #err{position:fixed;left:12px;bottom:12px;color:#fecaca}
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="hud">loading...</div>
+  <div id="err"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

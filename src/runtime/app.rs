@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     fs::File,
     io::BufReader,
@@ -18,23 +19,29 @@ use rodio::{Decoder, OutputStream, Sink, Source};
 
 use crate::{
     animation::{ChannelTarget, compute_global_matrices, default_poses},
-    cli::{BenchArgs, BenchSceneArg, Cli, Commands, InspectArgs, RunArgs, RunSceneArg, StartArgs},
+    assets::vmd_camera::parse_vmd_camera,
+    cli::{
+        BenchArgs, BenchSceneArg, Cli, Commands, InspectArgs, PreviewArgs, RunArgs, RunSceneArg,
+        StartArgs,
+    },
+    engine::camera_track::{CameraTrackSampler, MmdCameraTransform},
     loader,
     pipeline::FramePipeline,
     render::backend::render_frame_with_backend,
     renderer::{Camera, FrameBuffers, GlyphRamp, RenderScratch, RenderStats},
     runtime::{
         config::{GasciiConfig, load_gascii_config},
+        preview::run_preview_server,
         start_ui::{
             StageChoice, StageStatus, StageTransform, StartWizardDefaults, run_start_wizard,
         },
     },
     scene::{
-        AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraFocusMode, CellAspectMode,
-        CenterLockMode, CinematicCameraMode, ClarityProfile, ColorMode, ContrastProfile,
-        DetailProfile, Node, PerfProfile, RenderBackend, RenderConfig, RenderMode, SceneCpu,
-        SyncSpeedMode, TextureSamplingMode, ThemeStyle, estimate_cell_aspect_from_window,
-        resolve_cell_aspect,
+        AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
+        CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
+        ClarityProfile, ColorMode, ContrastProfile, DetailProfile, FreeFlyState, MeshLayer, Node,
+        PerfProfile, RenderBackend, RenderConfig, RenderMode, SceneCpu, SyncSpeedMode,
+        TextureSamplingMode, ThemeStyle, estimate_cell_aspect_from_window, resolve_cell_aspect,
     },
     terminal::{PresentMode, TerminalSession, supports_truecolor},
 };
@@ -44,6 +51,7 @@ pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Start(args) => start(args),
         Commands::Run(args) => run_interactive(args),
+        Commands::Preview(args) => preview(args),
         Commands::Bench(args) => bench(args),
         Commands::Inspect(args) => inspect(args),
     }
@@ -106,6 +114,22 @@ struct AudioSyncRuntime {
     playback: MusicPlayback,
     speed_factor: f32,
     envelope: Option<AudioEnvelope>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeCameraSettings {
+    mode: CameraMode,
+    align_preset: CameraAlignPreset,
+    unit_scale: f32,
+    vmd_fps: f32,
+    vmd_path: Option<PathBuf>,
+    look_speed: f32,
+}
+
+#[derive(Debug, Clone)]
+struct LoadedCameraTrack {
+    sampler: CameraTrackSampler,
+    transform: MmdCameraTransform,
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +206,7 @@ struct RuntimeInputResult {
     resized: bool,
     stage_changed: bool,
     center_lock_blocked_pan: bool,
+    center_lock_auto_disabled: bool,
     zoom_changed: bool,
     last_key: Option<&'static str>,
 }
@@ -297,8 +322,14 @@ impl CenterLockState {
         extent_y: f32,
     ) -> Vec3 {
         let anchor = match mode {
-            CenterLockMode::Root => stats.root_screen_px.or(stats.visible_centroid_px),
-            CenterLockMode::Mixed => match (stats.root_screen_px, stats.visible_centroid_px) {
+            CenterLockMode::Root => stats
+                .root_screen_px
+                .or(stats.subject_centroid_px)
+                .or(stats.visible_centroid_px),
+            CenterLockMode::Mixed => match (
+                stats.root_screen_px,
+                stats.subject_centroid_px.or(stats.visible_centroid_px),
+            ) {
                 (Some(root), Some(centroid)) => Some((
                     root.0 * 0.7 + centroid.0 * 0.3,
                     root.1 * 0.7 + centroid.1 * 0.3,
@@ -475,6 +506,49 @@ impl AutoRadiusGuard {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct DistanceClampGuard {
+    last_eye: Option<Vec3>,
+}
+
+impl DistanceClampGuard {
+    fn apply(
+        &mut self,
+        camera: &mut Camera,
+        subject_target: Vec3,
+        extent_y: f32,
+        alpha: f32,
+    ) -> f32 {
+        let min_dist = (extent_y * 0.42).clamp(0.35, 1.20);
+        let to_eye = camera.eye - subject_target;
+        let dist = to_eye.length();
+        let mut desired_eye = camera.eye;
+        if dist < min_dist {
+            let dir = if dist <= f32::EPSILON {
+                Vec3::new(0.0, 0.0, 1.0)
+            } else {
+                to_eye / dist
+            };
+            desired_eye = subject_target + dir * min_dist;
+        }
+        let base_eye = self.last_eye.unwrap_or(camera.eye);
+        let a = alpha.clamp(0.0, 1.0);
+        camera.eye = base_eye + (desired_eye - base_eye) * a;
+        self.last_eye = Some(camera.eye);
+        min_dist
+    }
+
+    fn reset(&mut self) {
+        self.last_eye = None;
+    }
+}
+
+fn dynamic_clip_planes(min_dist: f32, extent_y: f32) -> (f32, f32) {
+    let near = (min_dist * 0.08).clamp(0.01, 0.08);
+    let far = (min_dist + extent_y * 6.0).clamp(near + 2.0, 300.0);
+    (near, far)
+}
+
 fn start(args: StartArgs) -> Result<()> {
     let runtime_cfg = load_runtime_config();
     let visual = resolve_visual_options_for_start(&args, &runtime_cfg);
@@ -506,6 +580,8 @@ fn start(args: StartArgs) -> Result<()> {
         backend: visual.backend,
         center_lock: visual.center_lock,
         center_lock_mode: visual.center_lock_mode,
+        wasd_mode: visual.wasd_mode,
+        freefly_speed: visual.freefly_speed,
         camera_focus: visual.camera_focus,
         material_color: visual.material_color,
         texture_sampling: visual.texture_sampling,
@@ -597,7 +673,7 @@ fn start(args: StartArgs) -> Result<()> {
     }
     let mut config = render_config_from_start(
         &args,
-        ResolvedVisualOptions {
+        &ResolvedVisualOptions {
             cell_aspect_mode: selection.cell_aspect_mode,
             cell_aspect_trim: selection.cell_aspect_trim,
             contrast_profile: selection.contrast_profile,
@@ -607,6 +683,14 @@ fn start(args: StartArgs) -> Result<()> {
             exposure_bias: visual.exposure_bias,
             center_lock: selection.center_lock,
             center_lock_mode: selection.center_lock_mode,
+            wasd_mode: selection.wasd_mode,
+            freefly_speed: selection.freefly_speed,
+            camera_look_speed: visual.camera_look_speed,
+            camera_mode: visual.camera_mode,
+            camera_align_preset: visual.camera_align_preset,
+            camera_unit_scale: visual.camera_unit_scale,
+            camera_vmd_fps: visual.camera_vmd_fps,
+            camera_vmd_path: visual.camera_vmd_path.clone(),
             camera_focus: selection.camera_focus,
             material_color: selection.material_color,
             texture_sampling: selection.texture_sampling,
@@ -643,6 +727,16 @@ fn start(args: StartArgs) -> Result<()> {
     config.cell_aspect = selection.cell_aspect;
     config.center_lock = selection.center_lock;
     config.center_lock_mode = selection.center_lock_mode;
+    let wasd_mode = selection.wasd_mode;
+    let freefly_speed = selection.freefly_speed;
+    let camera_settings = RuntimeCameraSettings {
+        mode: visual.camera_mode,
+        align_preset: visual.camera_align_preset,
+        unit_scale: visual.camera_unit_scale,
+        vmd_fps: visual.camera_vmd_fps,
+        vmd_path: visual.camera_vmd_path.clone(),
+        look_speed: visual.camera_look_speed,
+    };
     config.stage_level = selection.stage_level;
     config.stage_reactive = selection.stage_reactive;
     config.material_color = selection.material_color;
@@ -664,6 +758,9 @@ fn start(args: StartArgs) -> Result<()> {
         args.orbit_radius,
         args.camera_height,
         args.look_at_y,
+        wasd_mode,
+        freefly_speed,
+        camera_settings,
     )
 }
 
@@ -709,8 +806,16 @@ fn run_interactive(args: RunArgs) -> Result<()> {
             }
         }
     }
-    let mut config = render_config_from_run(&args, visual);
+    let mut config = render_config_from_run(&args, &visual);
     apply_runtime_render_tuning(&mut config, &runtime_cfg);
+    let camera_settings = RuntimeCameraSettings {
+        mode: visual.camera_mode,
+        align_preset: visual.camera_align_preset,
+        unit_scale: visual.camera_unit_scale,
+        vmd_fps: visual.camera_vmd_fps,
+        vmd_path: visual.camera_vmd_path.clone(),
+        look_speed: visual.camera_look_speed,
+    };
     run_scene_interactive(
         scene,
         animation_index,
@@ -722,14 +827,27 @@ fn run_interactive(args: RunArgs) -> Result<()> {
         args.orbit_radius,
         args.camera_height,
         args.look_at_y,
+        visual.wasd_mode,
+        visual.freefly_speed,
+        camera_settings,
     )
+}
+
+fn preview(args: PreviewArgs) -> Result<()> {
+    let runtime_cfg = load_runtime_config();
+    let camera_path = args
+        .camera_vmd
+        .clone()
+        .or_else(|| runtime_cfg.camera_vmd_path.clone())
+        .or_else(|| discover_default_camera_vmd(Path::new("assets/camera")));
+    run_preview_server(&args, camera_path)
 }
 
 fn load_runtime_config() -> GasciiConfig {
     load_gascii_config(Path::new("Gascii.config"))
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ResolvedVisualOptions {
     cell_aspect_mode: CellAspectMode,
     cell_aspect_trim: f32,
@@ -740,6 +858,14 @@ struct ResolvedVisualOptions {
     exposure_bias: f32,
     center_lock: bool,
     center_lock_mode: CenterLockMode,
+    wasd_mode: CameraControlMode,
+    freefly_speed: f32,
+    camera_look_speed: f32,
+    camera_mode: CameraMode,
+    camera_align_preset: CameraAlignPreset,
+    camera_unit_scale: f32,
+    camera_vmd_fps: f32,
+    camera_vmd_path: Option<PathBuf>,
     camera_focus: CameraFocusMode,
     material_color: bool,
     texture_sampling: TextureSamplingMode,
@@ -804,6 +930,39 @@ fn resolve_visual_options_for_start(
             .center_lock_mode
             .map(Into::into)
             .unwrap_or(runtime_cfg.center_lock_mode),
+        wasd_mode: args
+            .wasd_mode
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.wasd_mode),
+        freefly_speed: args
+            .freefly_speed
+            .unwrap_or(runtime_cfg.freefly_speed)
+            .clamp(0.1, 8.0),
+        camera_look_speed: args
+            .camera_look_speed
+            .unwrap_or(runtime_cfg.camera_look_speed)
+            .clamp(0.1, 8.0),
+        camera_mode: args
+            .camera_mode
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.camera_mode),
+        camera_align_preset: args
+            .camera_align_preset
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.camera_align_preset),
+        camera_unit_scale: args
+            .camera_unit_scale
+            .unwrap_or(runtime_cfg.camera_unit_scale)
+            .clamp(0.01, 2.0),
+        camera_vmd_fps: args
+            .camera_vmd_fps
+            .unwrap_or(runtime_cfg.camera_vmd_fps)
+            .clamp(1.0, 240.0),
+        camera_vmd_path: args
+            .camera_vmd
+            .clone()
+            .or(runtime_cfg.camera_vmd_path.clone())
+            .or_else(|| discover_default_camera_vmd(Path::new("assets/camera"))),
         camera_focus: args
             .camera_focus
             .map(Into::into)
@@ -902,6 +1061,39 @@ fn resolve_visual_options_for_run(
             .center_lock_mode
             .map(Into::into)
             .unwrap_or(runtime_cfg.center_lock_mode),
+        wasd_mode: args
+            .wasd_mode
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.wasd_mode),
+        freefly_speed: args
+            .freefly_speed
+            .unwrap_or(runtime_cfg.freefly_speed)
+            .clamp(0.1, 8.0),
+        camera_look_speed: args
+            .camera_look_speed
+            .unwrap_or(runtime_cfg.camera_look_speed)
+            .clamp(0.1, 8.0),
+        camera_mode: args
+            .camera_mode
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.camera_mode),
+        camera_align_preset: args
+            .camera_align_preset
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.camera_align_preset),
+        camera_unit_scale: args
+            .camera_unit_scale
+            .unwrap_or(runtime_cfg.camera_unit_scale)
+            .clamp(0.01, 2.0),
+        camera_vmd_fps: args
+            .camera_vmd_fps
+            .unwrap_or(runtime_cfg.camera_vmd_fps)
+            .clamp(1.0, 240.0),
+        camera_vmd_path: args
+            .camera_vmd
+            .clone()
+            .or(runtime_cfg.camera_vmd_path.clone())
+            .or_else(|| discover_default_camera_vmd(Path::new("assets/camera"))),
         camera_focus: args
             .camera_focus
             .map(Into::into)
@@ -1000,6 +1192,17 @@ fn resolve_visual_options_for_bench(
             .center_lock_mode
             .map(Into::into)
             .unwrap_or(runtime_cfg.center_lock_mode),
+        wasd_mode: runtime_cfg.wasd_mode,
+        freefly_speed: runtime_cfg.freefly_speed.clamp(0.1, 8.0),
+        camera_look_speed: runtime_cfg.camera_look_speed.clamp(0.1, 8.0),
+        camera_mode: runtime_cfg.camera_mode,
+        camera_align_preset: runtime_cfg.camera_align_preset,
+        camera_unit_scale: runtime_cfg.camera_unit_scale.clamp(0.01, 2.0),
+        camera_vmd_fps: runtime_cfg.camera_vmd_fps.clamp(1.0, 240.0),
+        camera_vmd_path: runtime_cfg
+            .camera_vmd_path
+            .clone()
+            .or_else(|| discover_default_camera_vmd(Path::new("assets/camera"))),
         camera_focus: args
             .camera_focus
             .map(Into::into)
@@ -1266,6 +1469,9 @@ fn run_scene_interactive(
     orbit_radius: f32,
     camera_height: f32,
     look_at_y: f32,
+    wasd_mode: CameraControlMode,
+    freefly_speed: f32,
+    camera_settings: RuntimeCameraSettings,
 ) -> Result<()> {
     config.backend = resolve_runtime_backend(config.backend);
     let _truecolor_supported = supports_truecolor();
@@ -1285,8 +1491,10 @@ fn run_scene_interactive(
     let mut render_scratch = RenderScratch::with_capacity(max_scene_vertices(&scene));
     let framing = compute_scene_framing(&scene, &config, orbit_radius, camera_height, look_at_y);
     let scene_extent_y = scene
-        .meshes
+        .mesh_instances
         .iter()
+        .filter(|instance| matches!(instance.layer, MeshLayer::Subject))
+        .filter_map(|instance| scene.meshes.get(instance.mesh_index))
         .flat_map(|mesh| mesh.positions.iter().map(|p| p.y))
         .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), y| {
             (lo.min(y), hi.max(y))
@@ -1322,6 +1530,7 @@ fn run_scene_interactive(
     let mut visibility_watchdog = VisibilityWatchdog::default();
     let mut center_lock_state = CenterLockState::default();
     let mut auto_radius_guard = AutoRadiusGuard::default();
+    let mut distance_clamp_guard = DistanceClampGuard::default();
     let mut screen_fit = ScreenFitController::default();
     let mut exposure_auto_boost = ExposureAutoBoost::default();
     let base_triangle_stride = config.triangle_stride.max(1);
@@ -1331,6 +1540,18 @@ fn run_scene_interactive(
     let mut osd_until: Option<Instant> = Some(Instant::now() + Duration::from_secs(2));
     let mut last_render_stats = RenderStats::default();
     let mut effective_aspect_state = resolve_cell_aspect(&config, detect_terminal_cell_aspect());
+    let initial_orbit_camera = orbit_camera(
+        orbit_state.angle,
+        framing.radius.max(0.2),
+        framing.camera_height,
+        framing.focus,
+    );
+    let mut freefly_state = freefly_state_from_camera(initial_orbit_camera, freefly_speed);
+    let initial_freefly_state = freefly_state;
+    let loaded_camera_track = load_camera_track(&camera_settings);
+    if camera_settings.vmd_path.is_some() && loaded_camera_track.is_none() {
+        eprintln!("warning: camera VMD could not be loaded. fallback to runtime camera.");
+    }
     if scaled {
         osd_until = Some(Instant::now() + Duration::from_secs(3));
     }
@@ -1368,6 +1589,9 @@ fn run_scene_interactive(
             &mut cinematic_mode,
             &mut reactive_gain,
             &mut exposure_bias,
+            wasd_mode,
+            camera_settings.look_speed,
+            &mut freefly_state,
         )?;
         if input.quit {
             break;
@@ -1375,6 +1599,7 @@ fn run_scene_interactive(
         if input.resized {
             terminal.force_full_repaint();
             center_lock_state.reset();
+            distance_clamp_guard.reset();
             screen_fit.on_resize();
             exposure_auto_boost.on_resize();
             last_render_stats = RenderStats::default();
@@ -1393,8 +1618,15 @@ fn run_scene_interactive(
             last_osd_notice = Some("center-lock on: pan disabled (press f to unlock)".to_owned());
             osd_until = Some(Instant::now() + Duration::from_secs(2));
         }
+        if input.center_lock_auto_disabled {
+            last_osd_notice = Some("center-lock off: freefly active".to_owned());
+            osd_until = Some(Instant::now() + Duration::from_secs(2));
+        }
         if input.zoom_changed {
             screen_fit.on_manual_zoom();
+        }
+        if input.last_key == Some("c") {
+            freefly_state = initial_freefly_state;
         }
         if matches!(config.mode, RenderMode::Ascii) && ascii_force_color_active {
             if input.last_key == Some("n") {
@@ -1504,43 +1736,88 @@ fn run_scene_interactive(
             jitter_scale,
         );
         let effective_zoom = (user_zoom * screen_fit.auto_zoom_gain).clamp(0.20, 8.0);
-        let dynamic_center_offset = if center_lock_enabled {
-            center_lock_state.update(
-                &last_render_stats,
-                center_lock_mode,
-                frame.width,
-                frame.height,
-                framing.radius * effective_zoom * radius_mul,
-                extent_y,
-            )
-        } else {
-            center_lock_state.reset();
-            Vec3::ZERO
-        };
-
         let auto_radius_shrink = auto_radius_guard.shrink_ratio;
-        let camera = orbit_camera(
-            orbit_state.angle + angle_jitter,
-            (framing.radius * effective_zoom * radius_mul * (1.0 - auto_radius_shrink))
-                .clamp(0.2, 1000.0),
-            (framing.camera_height + camera_height_offset + height_off).clamp(-1000.0, 1000.0),
-            framing.focus
-                + dynamic_center_offset
-                + if center_lock_enabled {
-                    Vec3::ZERO
-                } else {
-                    focus_offset
-                }
-                + Vec3::new(
-                    0.0,
-                    if center_lock_enabled {
-                        focus_y_off.clamp(-extent_y * 0.03, extent_y * 0.03)
+        let mut camera = if matches!(wasd_mode, CameraControlMode::FreeFly) {
+            center_lock_state.reset();
+            freefly_camera(freefly_state)
+        } else {
+            let dynamic_center_offset = if center_lock_enabled {
+                center_lock_state.update(
+                    &last_render_stats,
+                    center_lock_mode,
+                    frame.width,
+                    frame.height,
+                    framing.radius * effective_zoom * radius_mul,
+                    extent_y,
+                )
+            } else {
+                center_lock_state.reset();
+                Vec3::ZERO
+            };
+            orbit_camera(
+                orbit_state.angle + angle_jitter,
+                (framing.radius * effective_zoom * radius_mul * (1.0 - auto_radius_shrink))
+                    .clamp(0.2, 1000.0),
+                (framing.camera_height + camera_height_offset + height_off).clamp(-1000.0, 1000.0),
+                framing.focus
+                    + dynamic_center_offset
+                    + if center_lock_enabled {
+                        Vec3::ZERO
                     } else {
-                        focus_y_off
-                    },
-                    0.0,
-                ),
-        );
+                        focus_offset
+                    }
+                    + Vec3::new(
+                        0.0,
+                        if center_lock_enabled {
+                            focus_y_off.clamp(-extent_y * 0.03, extent_y * 0.03)
+                        } else {
+                            focus_y_off
+                        },
+                        0.0,
+                    ),
+            )
+        };
+        if let Some(track) = loaded_camera_track.as_ref() {
+            if let Some(vmd_pose) = track
+                .sampler
+                .sample_pose(animation_time, track.transform, true)
+            {
+                match camera_settings.mode {
+                    CameraMode::Off => {}
+                    CameraMode::Vmd => {
+                        camera.eye = vmd_pose.eye;
+                        camera.target = vmd_pose.target;
+                        camera.up = vmd_pose.up;
+                        frame_config.fov_deg = vmd_pose.fov_deg;
+                    }
+                    CameraMode::Blend => {
+                        camera.eye = camera.eye.lerp(vmd_pose.eye, 0.70);
+                        camera.target = camera.target.lerp(vmd_pose.target, 0.70);
+                        camera.up = camera.up.lerp(vmd_pose.up, 0.70).normalize_or_zero();
+                        if camera.up.length_squared() <= f32::EPSILON {
+                            camera.up = Vec3::Y;
+                        }
+                        frame_config.fov_deg =
+                            frame_config.fov_deg * 0.30 + vmd_pose.fov_deg * 0.70;
+                    }
+                }
+            }
+        }
+        let subject_target = if let Some(node_index) = scene.root_center_node {
+            pipeline
+                .globals()
+                .get(node_index)
+                .copied()
+                .unwrap_or(glam::Mat4::IDENTITY)
+                .transform_point3(Vec3::ZERO)
+        } else {
+            framing.focus
+        };
+        let min_dist = distance_clamp_guard.apply(&mut camera, subject_target, extent_y, 0.35);
+        let (dyn_near, dyn_far) = dynamic_clip_planes(min_dist, extent_y);
+        frame_config.near = dyn_near;
+        frame_config.far = dyn_far;
+
         let stats = render_frame_with_backend(
             &mut frame,
             &frame_config,
@@ -1554,16 +1831,22 @@ fn run_scene_interactive(
             rotation,
         );
         last_render_stats = stats;
+        let subject_height_ratio = if stats.subject_visible_height_ratio > 0.0 {
+            stats.subject_visible_height_ratio
+        } else {
+            stats.visible_height_ratio
+        };
+        let subject_visible_ratio = if stats.subject_visible_ratio > 0.0 {
+            stats.subject_visible_ratio
+        } else {
+            stats.visible_cell_ratio
+        };
         auto_radius_guard.update(
-            stats.visible_height_ratio,
+            subject_height_ratio,
             center_lock_enabled && matches!(braille_profile, BrailleProfile::Safe),
         );
-        screen_fit.update(
-            stats.visible_height_ratio,
-            frame_config.mode,
-            center_lock_enabled,
-        );
-        exposure_auto_boost.update(stats.visible_cell_ratio);
+        screen_fit.update(subject_height_ratio, frame_config.mode, center_lock_enabled);
+        exposure_auto_boost.update(subject_visible_ratio);
 
         if visibility_watchdog.observe(stats.visible_cell_ratio) {
             visibility_watchdog.reset();
@@ -1573,6 +1856,7 @@ fn run_scene_interactive(
             exposure_bias = (exposure_bias + 0.08).clamp(-0.5, 0.8);
             center_lock_state.reset();
             auto_radius_guard = AutoRadiusGuard::default();
+            distance_clamp_guard.reset();
             screen_fit.on_resize();
             exposure_auto_boost.on_resize();
             camera_director = CameraDirectorState::default();
@@ -1918,7 +2202,7 @@ fn quantile_sorted(sorted: &[f32], q: f32) -> f32 {
     sorted[lo] * (1.0 - t) + sorted[hi] * t
 }
 
-fn render_config_from_run(args: &RunArgs, visual: ResolvedVisualOptions) -> RenderConfig {
+fn render_config_from_run(args: &RunArgs, visual: &ResolvedVisualOptions) -> RenderConfig {
     let mode: RenderMode = args.mode.into();
     let color_mode = resolve_effective_color_mode(
         mode,
@@ -1978,7 +2262,7 @@ fn render_config_from_run(args: &RunArgs, visual: ResolvedVisualOptions) -> Rend
     }
 }
 
-fn render_config_from_start(args: &StartArgs, visual: ResolvedVisualOptions) -> RenderConfig {
+fn render_config_from_start(args: &StartArgs, visual: &ResolvedVisualOptions) -> RenderConfig {
     let mode: RenderMode = args.mode.into();
     let color_mode = resolve_effective_color_mode(
         mode,
@@ -2079,6 +2363,33 @@ fn discover_music_files(dir: &Path) -> Result<Vec<PathBuf>> {
         .collect::<Vec<_>>();
     files.sort();
     Ok(files)
+}
+
+fn discover_default_camera_vmd(dir: &Path) -> Option<PathBuf> {
+    let mut files = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("vmd"))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    if files.is_empty() {
+        return None;
+    }
+    files.sort();
+    if let Some(preferred) = files.iter().find(|path| {
+        path.file_stem()
+            .and_then(|value| value.to_str())
+            .map(|name| name.to_ascii_lowercase().contains("world_is_mine"))
+            .unwrap_or(false)
+    }) {
+        return Some(preferred.clone());
+    }
+    files.into_iter().next()
 }
 
 fn resolved_stage_dir(cli_stage_dir: &Path, runtime_cfg: &GasciiConfig) -> PathBuf {
@@ -2367,6 +2678,7 @@ fn merge_scenes(mut base: SceneCpu, mut overlay: SceneCpu) -> SceneCpu {
         instance.mesh_index += mesh_offset;
         instance.node_index += node_offset;
         instance.skin_index = instance.skin_index.map(|idx| idx + skin_offset);
+        instance.layer = MeshLayer::Stage;
     }
     base.mesh_instances.append(&mut overlay.mesh_instances);
 
@@ -2599,6 +2911,17 @@ fn compute_animation_time(
         .unwrap_or(elapsed_wall + offset)
 }
 
+fn load_camera_track(settings: &RuntimeCameraSettings) -> Option<LoadedCameraTrack> {
+    if matches!(settings.mode, CameraMode::Off) {
+        return None;
+    }
+    let path = settings.vmd_path.as_deref()?;
+    let track = parse_vmd_camera(path).ok()?;
+    let sampler = CameraTrackSampler::from_vmd(&track, settings.vmd_fps)?;
+    let transform = MmdCameraTransform::from_preset(settings.align_preset, settings.unit_scale);
+    Some(LoadedCameraTrack { sampler, transform })
+}
+
 fn detect_terminal_cell_aspect() -> Option<f32> {
     let ws = window_size().ok()?;
     estimate_cell_aspect_from_window(ws.columns, ws.rows, ws.width, ws.height)
@@ -2698,12 +3021,15 @@ fn process_runtime_input(
     cinematic_mode: &mut CinematicCameraMode,
     reactive_gain: &mut f32,
     exposure_bias: &mut f32,
+    wasd_mode: CameraControlMode,
+    camera_look_speed: f32,
+    freefly_state: &mut FreeFlyState,
 ) -> Result<RuntimeInputResult> {
     let mut result = RuntimeInputResult::default();
     while event::poll(Duration::from_millis(0))? {
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                KeyCode::Esc | KeyCode::Char('Q') => {
                     result.quit = true;
                     result.last_key = Some("q");
                     return Ok(result);
@@ -2718,6 +3044,85 @@ fn process_runtime_input(
                     result.last_key = Some("r");
                     result.status_changed = true;
                 }
+                KeyCode::Char('w') | KeyCode::Char('W') => {
+                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                        if *center_lock_enabled {
+                            *center_lock_enabled = false;
+                            result.center_lock_auto_disabled = true;
+                        }
+                        freefly_translate(freefly_state, FreeFlyDirection::Forward);
+                        result.status_changed = true;
+                        result.last_key = Some("w");
+                    }
+                }
+                KeyCode::Char('s') | KeyCode::Char('S') => {
+                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                        if *center_lock_enabled {
+                            *center_lock_enabled = false;
+                            result.center_lock_auto_disabled = true;
+                        }
+                        freefly_translate(freefly_state, FreeFlyDirection::Backward);
+                        result.status_changed = true;
+                        result.last_key = Some("s");
+                    }
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                        if *center_lock_enabled {
+                            *center_lock_enabled = false;
+                            result.center_lock_auto_disabled = true;
+                        }
+                        freefly_translate(freefly_state, FreeFlyDirection::Left);
+                        result.status_changed = true;
+                        result.last_key = Some("a");
+                    }
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                        if *center_lock_enabled {
+                            *center_lock_enabled = false;
+                            result.center_lock_auto_disabled = true;
+                        }
+                        freefly_translate(freefly_state, FreeFlyDirection::Right);
+                        result.status_changed = true;
+                        result.last_key = Some("d");
+                    }
+                }
+                KeyCode::Char('q') => {
+                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                        if *center_lock_enabled {
+                            *center_lock_enabled = false;
+                            result.center_lock_auto_disabled = true;
+                        }
+                        freefly_translate(freefly_state, FreeFlyDirection::Down);
+                        result.status_changed = true;
+                        result.last_key = Some("q");
+                    } else {
+                        result.quit = true;
+                        result.last_key = Some("q");
+                        return Ok(result);
+                    }
+                }
+                KeyCode::Char('e') => {
+                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                        if *center_lock_enabled {
+                            *center_lock_enabled = false;
+                            result.center_lock_auto_disabled = true;
+                        }
+                        freefly_translate(freefly_state, FreeFlyDirection::Up);
+                        result.status_changed = true;
+                        result.last_key = Some("e");
+                    } else {
+                        *exposure_bias = (*exposure_bias - 0.04).clamp(-0.5, 0.8);
+                        result.status_changed = true;
+                        result.last_key = Some("e");
+                    }
+                }
+                KeyCode::Char('E') => {
+                    *exposure_bias = (*exposure_bias + 0.04).clamp(-0.5, 0.8);
+                    result.status_changed = true;
+                    result.last_key = Some("E");
+                }
                 KeyCode::Char('+') | KeyCode::Char('=') => {
                     *stage_level = stage_level.saturating_add(1).min(4);
                     result.status_changed = true;
@@ -2729,16 +3134,6 @@ fn process_runtime_input(
                     result.status_changed = true;
                     result.stage_changed = true;
                     result.last_key = Some("-");
-                }
-                KeyCode::Char('e') => {
-                    *exposure_bias = (*exposure_bias - 0.04).clamp(-0.5, 0.8);
-                    result.status_changed = true;
-                    result.last_key = Some("e");
-                }
-                KeyCode::Char('E') => {
-                    *exposure_bias = (*exposure_bias + 0.04).clamp(-0.5, 0.8);
-                    result.status_changed = true;
-                    result.last_key = Some("E");
                 }
                 KeyCode::Char('f') | KeyCode::Char('F') => {
                     *center_lock_enabled = !*center_lock_enabled;
@@ -2766,21 +3161,83 @@ fn process_runtime_input(
                     *zoom = (*zoom - 0.08).clamp(0.2, 8.0);
                     result.zoom_changed = true;
                 }
-                KeyCode::Left | KeyCode::Char('j') | KeyCode::Char('J') => {
+                KeyCode::Left => {
+                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                        if *center_lock_enabled {
+                            *center_lock_enabled = false;
+                            result.center_lock_auto_disabled = true;
+                        }
+                        freefly_rotate(freefly_state, -0.06 * camera_look_speed, 0.0);
+                        result.status_changed = true;
+                        result.last_key = Some("left");
+                    } else if *center_lock_enabled {
+                        result.center_lock_blocked_pan = true;
+                    } else {
+                        focus_offset.x -= 0.08;
+                    }
+                }
+                KeyCode::Right => {
+                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                        if *center_lock_enabled {
+                            *center_lock_enabled = false;
+                            result.center_lock_auto_disabled = true;
+                        }
+                        freefly_rotate(freefly_state, 0.06 * camera_look_speed, 0.0);
+                        result.status_changed = true;
+                        result.last_key = Some("right");
+                    } else if *center_lock_enabled {
+                        result.center_lock_blocked_pan = true;
+                    } else {
+                        focus_offset.x += 0.08;
+                    }
+                }
+                KeyCode::Up => {
+                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                        if *center_lock_enabled {
+                            *center_lock_enabled = false;
+                            result.center_lock_auto_disabled = true;
+                        }
+                        freefly_rotate(freefly_state, 0.0, 0.05 * camera_look_speed);
+                        result.status_changed = true;
+                        result.last_key = Some("up");
+                    } else if *center_lock_enabled {
+                        result.center_lock_blocked_pan = true;
+                    } else {
+                        focus_offset.y += 0.08;
+                        *camera_height_offset += 0.08;
+                    }
+                }
+                KeyCode::Down => {
+                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                        if *center_lock_enabled {
+                            *center_lock_enabled = false;
+                            result.center_lock_auto_disabled = true;
+                        }
+                        freefly_rotate(freefly_state, 0.0, -0.05 * camera_look_speed);
+                        result.status_changed = true;
+                        result.last_key = Some("down");
+                    } else if *center_lock_enabled {
+                        result.center_lock_blocked_pan = true;
+                    } else {
+                        focus_offset.y -= 0.08;
+                        *camera_height_offset -= 0.08;
+                    }
+                }
+                KeyCode::Char('j') | KeyCode::Char('J') => {
                     if *center_lock_enabled {
                         result.center_lock_blocked_pan = true;
                     } else {
                         focus_offset.x -= 0.08;
                     }
                 }
-                KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('L') => {
+                KeyCode::Char('l') | KeyCode::Char('L') => {
                     if *center_lock_enabled {
                         result.center_lock_blocked_pan = true;
                     } else {
                         focus_offset.x += 0.08;
                     }
                 }
-                KeyCode::Up | KeyCode::Char('i') | KeyCode::Char('I') => {
+                KeyCode::Char('i') | KeyCode::Char('I') => {
                     if *center_lock_enabled {
                         result.center_lock_blocked_pan = true;
                     } else {
@@ -2788,7 +3245,7 @@ fn process_runtime_input(
                         *camera_height_offset += 0.08;
                     }
                 }
-                KeyCode::Down | KeyCode::Char('k') | KeyCode::Char('K') => {
+                KeyCode::Char('k') | KeyCode::Char('K') => {
                     if *center_lock_enabled {
                         result.center_lock_blocked_pan = true;
                     } else {
@@ -3004,8 +3461,74 @@ fn bench(args: BenchArgs) -> Result<()> {
 }
 
 fn inspect(args: InspectArgs) -> Result<()> {
+    let raw = gltf::Gltf::open(&args.glb)
+        .with_context(|| format!("failed to parse glTF metadata: {}", args.glb.display()))?;
     let scene = loader::load_gltf(&args.glb)?;
+    let extensions_required = raw
+        .extensions_required()
+        .map(|name| name.to_owned())
+        .collect::<Vec<_>>();
+    let extensions_used = raw
+        .extensions_used()
+        .map(|name| name.to_owned())
+        .collect::<Vec<_>>();
+    let mut khr_texture_transform_primitives = 0usize;
+    let mut texcoord_override_counts: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut texcoord_base_counts: BTreeMap<u32, usize> = BTreeMap::new();
+    for mesh in raw.meshes() {
+        for primitive in mesh.primitives() {
+            let material = primitive.material();
+            let pbr = material.pbr_metallic_roughness();
+            if let Some(base_color_info) = pbr.base_color_texture() {
+                let base_coord = base_color_info.tex_coord();
+                *texcoord_base_counts.entry(base_coord).or_insert(0) += 1;
+                if let Some(transform) = base_color_info.texture_transform() {
+                    khr_texture_transform_primitives += 1;
+                    if let Some(override_coord) = transform.tex_coord() {
+                        *texcoord_override_counts.entry(override_coord).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+    }
+
     println!("file: {}", args.glb.display());
+    println!(
+        "extensions_required: {}",
+        if extensions_required.is_empty() {
+            "[]".to_owned()
+        } else {
+            format!("{extensions_required:?}")
+        }
+    );
+    println!(
+        "extensions_used: {}",
+        if extensions_used.is_empty() {
+            "[]".to_owned()
+        } else {
+            format!("{extensions_used:?}")
+        }
+    );
+    println!(
+        "khr_texture_transform_primitives: {}",
+        khr_texture_transform_primitives
+    );
+    println!(
+        "base_color_texcoord_distribution: {}",
+        if texcoord_base_counts.is_empty() {
+            "{}".to_owned()
+        } else {
+            format!("{texcoord_base_counts:?}")
+        }
+    );
+    println!(
+        "texcoord_override_distribution: {}",
+        if texcoord_override_counts.is_empty() {
+            "{}".to_owned()
+        } else {
+            format!("{texcoord_override_counts:?}")
+        }
+    );
     println!("meshes: {}", scene.meshes.len());
     println!("mesh_instances: {}", scene.mesh_instances.len());
     println!("nodes: {}", scene.nodes.len());
@@ -3242,6 +3765,90 @@ fn camera_shot_values(shot: CameraShot, extent_y: f32) -> (f32, f32, f32, f32) {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum FreeFlyDirection {
+    Forward,
+    Backward,
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+fn freefly_state_from_camera(camera: Camera, move_speed: f32) -> FreeFlyState {
+    let forward = (camera.target - camera.eye).normalize_or_zero();
+    let direction = if forward.length_squared() <= f32::EPSILON {
+        Vec3::new(0.0, 0.0, -1.0)
+    } else {
+        forward
+    };
+    let pitch = direction.y.clamp(-1.0, 1.0).asin();
+    let yaw = direction.z.atan2(direction.x);
+    FreeFlyState {
+        eye: camera.eye,
+        target: camera.target,
+        yaw,
+        pitch,
+        move_speed: move_speed.clamp(0.1, 8.0),
+    }
+}
+
+fn freefly_forward(state: &FreeFlyState) -> Vec3 {
+    let cp = state.pitch.cos();
+    Vec3::new(
+        state.yaw.cos() * cp,
+        state.pitch.sin(),
+        state.yaw.sin() * cp,
+    )
+    .normalize_or_zero()
+}
+
+fn freefly_camera(state: FreeFlyState) -> Camera {
+    Camera {
+        eye: state.eye,
+        target: state.target,
+        up: Vec3::Y,
+    }
+}
+
+fn freefly_translate(state: &mut FreeFlyState, direction: FreeFlyDirection) {
+    let mut forward = (state.target - state.eye).normalize_or_zero();
+    if forward.length_squared() <= f32::EPSILON {
+        forward = freefly_forward(state);
+    }
+    if forward.length_squared() <= f32::EPSILON {
+        forward = Vec3::new(0.0, 0.0, -1.0);
+    }
+    let mut right = forward.cross(Vec3::Y).normalize_or_zero();
+    if right.length_squared() <= f32::EPSILON {
+        right = Vec3::X;
+    }
+    let up = Vec3::Y;
+    let axis = match direction {
+        FreeFlyDirection::Forward => forward,
+        FreeFlyDirection::Backward => -forward,
+        FreeFlyDirection::Left => -right,
+        FreeFlyDirection::Right => right,
+        FreeFlyDirection::Up => up,
+        FreeFlyDirection::Down => -up,
+    };
+    let step = 0.12 * state.move_speed.clamp(0.1, 8.0);
+    let delta = axis * step;
+    state.eye += delta;
+    state.target += delta;
+}
+
+fn freefly_rotate(state: &mut FreeFlyState, yaw_delta: f32, pitch_delta: f32) {
+    state.yaw += yaw_delta;
+    state.pitch = (state.pitch + pitch_delta).clamp(-1.45, 1.45);
+    let forward = freefly_forward(state);
+    if forward.length_squared() <= f32::EPSILON {
+        return;
+    }
+    let distance = (state.target - state.eye).length().max(0.5);
+    state.target = state.eye + forward * distance;
+}
+
 fn orbit_camera(orbit_angle: f32, orbit_radius: f32, camera_height: f32, focus: Vec3) -> Camera {
     let eye_x = focus.x + orbit_angle.cos() * orbit_radius;
     let eye_z = focus.z + orbit_angle.sin() * orbit_radius;
@@ -3461,5 +4068,43 @@ mod tests {
 
         let named = resolve_stage_choice_from_selector(&stages, "beta");
         assert_eq!(named.as_ref().map(|s| s.name.as_str()), Some("beta"));
+    }
+
+    #[test]
+    fn discover_default_camera_prefers_world_is_mine() {
+        let dir = tempdir().expect("tempdir");
+        let camera_dir = dir.path().join("assets").join("camera");
+        fs::create_dir_all(&camera_dir).expect("camera dir");
+        fs::write(camera_dir.join("a.vmd"), b"vmd").expect("a");
+        fs::write(camera_dir.join("world_is_mine.vmd"), b"vmd").expect("world");
+        let picked = discover_default_camera_vmd(&camera_dir).expect("picked");
+        assert_eq!(
+            picked.file_name().and_then(|value| value.to_str()),
+            Some("world_is_mine.vmd")
+        );
+    }
+
+    #[test]
+    fn distance_clamp_guard_pushes_camera_outside_min_radius() {
+        let mut guard = DistanceClampGuard::default();
+        let target = Vec3::ZERO;
+        let mut camera = Camera {
+            eye: Vec3::new(0.05, 0.0, 0.03),
+            target,
+            up: Vec3::Y,
+        };
+        let min_dist = guard.apply(&mut camera, target, 1.0, 1.0);
+        let actual = (camera.eye - target).length();
+        assert!(actual + 1e-4 >= min_dist);
+        assert!(min_dist >= 0.35);
+    }
+
+    #[test]
+    fn dynamic_clip_planes_remain_valid() {
+        let (near, far) = dynamic_clip_planes(0.6, 1.4);
+        assert!(near > 0.0);
+        assert!(far > near);
+        assert!(near <= 0.08);
+        assert!(far <= 300.0);
     }
 }

@@ -7,6 +7,7 @@ CPU-first terminal renderer for 3D meshes/animations (ASCII/Braille) with option
 - Software rasterizer (projection + triangle rasterization + z-buffer)
 - GLB/glTF + OBJ loading
 - GLB material color pipeline (`baseColorFactor` + `COLOR_0` + `TEXCOORD_0` + texture sampling)
+- `KHR_texture_transform` 반영(`baseColorTexture` UV transform/texCoord override)
 - Skeletal animation playback (glTF skin)
 - Morph target(표정) 애니메이션 재생 (`weights` 채널)
 - `cargo start` Ratatui 단계형 위저드
@@ -37,12 +38,15 @@ cargo start --stage "MyStageDir" --clarity-profile sharp --ansi-quantization off
 cargo start --mode ascii --color-mode mono --ascii-force-color on --ansi-quantization off
 cargo start --sync-offset-ms 120 --sync-speed-mode auto --cell-aspect-mode auto
 cargo start --mode braille --color-mode ansi --braille-profile safe --theme theater --audio-reactive on --cinematic-camera on --reactive-gain 0.35 --perf-profile balanced --detail-profile ultra --center-lock-mode root --camera-focus auto --material-color on --texture-sampling nearest --backend cpu
+cargo start --camera-vmd assets/camera/world_is_mine.vmd --camera-mode vmd --camera-align-preset std --camera-unit-scale 0.08 --camera-vmd-fps 30
 cargo run -- run --scene cube --mode ascii --fps-cap 30
 cargo run -- run --scene glb --glb /path/to/model.glb --fps-cap 0
 cargo run -- run --scene glb --glb /path/to/model.glb --anim 0 --mode ascii --fps-cap 30 --cell-aspect 0.5 --cell-aspect-mode auto --stage-dir assets/stage --stage auto
+cargo run -- run --scene glb --glb /path/to/model.glb --wasd-mode freefly --freefly-speed 1.2 --camera-look-speed 1.2
 cargo run --features gpu -- run --scene glb --glb /path/to/model.glb --mode braille --color-mode ansi --braille-profile normal --theme neon --perf-profile smooth --backend gpu
 cargo run -- run --scene obj --obj /path/to/model.obj --mode ascii --fps-cap 30
 cargo run -- inspect --glb /path/to/model.glb
+cargo run -- preview --glb /path/to/model.glb --anim 0 --camera-vmd assets/camera/world_is_mine.vmd --camera-mode blend --camera-align-preset alt-a --camera-unit-scale 0.08 --port 8787
 cargo run -- bench --scene cube --seconds 10
 cargo run -- bench --scene obj --obj /path/to/model.obj --seconds 10
 cargo run -- bench --scene glb-static --glb /path/to/model.glb --seconds 10
@@ -56,7 +60,7 @@ cargo run -- bench --scene glb-anim --glb /path/to/model.glb --anim 0 --seconds 
 1. 모델 선택
 2. 음악 선택 (`없음` 포함)
 3. 스테이지 선택 (`스테이지를 선택해 주세요`, 상태 배지 표시)
-4. 렌더 옵션 (`모드`, `성능/디테일/선명도 프로필`, `ANSI 양자화`, `백엔드`, `중앙 고정/기준`, `카메라 포커스`, `재질색상/텍스처 샘플링`, `model_lift`, `edge_accent`, `스테이지 레벨`, `FPS`, `대비`, `동기화`, `비율 모드`, `폰트 프리셋`)
+4. 렌더 옵션 (`모드`, `성능/디테일/선명도 프로필`, `ANSI 양자화`, `백엔드`, `중앙 고정/기준`, `WASD 모드/속도`, `카메라 포커스`, `재질색상/텍스처 샘플링`, `model_lift`, `edge_accent`, `스테이지 레벨`, `FPS`, `대비`, `동기화`, `비율 모드`, `폰트 프리셋`)
 5. 비율 캘리브레이션 (원형 프리뷰 + trim 조절)
 6. 확인/실행 (모델/음악/스테이지 상태, 감지/적용 비율, clip/audio 길이, speed factor 표시)
 
@@ -103,6 +107,14 @@ cargo run -- bench --scene glb-anim --glb /path/to/model.glb --anim 0 --seconds 
 - `exposure_bias = -0.5..0.8`
 - `center_lock = true|false`
 - `center_lock_mode = root|mixed`
+- `wasd_mode = orbit|freefly`
+- `freefly_speed = 0.1..8.0`
+- `camera_look_speed = 0.1..8.0`
+- `camera_mode = off|vmd|blend`
+- `camera_align_preset = std|alt-a|alt-b`
+- `camera_unit_scale = 0.01..2.0`
+- `camera_vmd_fps = 1..240`
+- `camera_vmd_path = assets/camera/<file>.vmd`
 - `camera_focus = auto|full|upper|face|hands`
 - `material_color = true|false`
 - `texture_sampling = nearest|bilinear`
@@ -155,6 +167,14 @@ stage_selection = auto
 exposure_bias = 0.00
 center_lock = true
 center_lock_mode = root
+wasd_mode = freefly
+freefly_speed = 1.00
+camera_look_speed = 1.00
+camera_mode = vmd
+camera_align_preset = std
+camera_unit_scale = 0.08
+camera_vmd_fps = 30.0
+camera_vmd_path = assets/camera/world_is_mine.vmd
 camera_focus = auto
 material_color = true
 texture_sampling = nearest
@@ -178,11 +198,14 @@ min_triangle_area_px2 = 0.08
 
 ## Runtime Controls
 
-- `q` or `Esc`: quit
+- `Esc` or `Q`: quit
 - `o`: orbit camera toggle
 - `r`: model auto-spin toggle (non-animated scene)
+- `W/A/S/D`: freefly 전후/좌우 이동 (`--wasd-mode freefly`)
+- `q/e`: freefly 하강/상승 (`--wasd-mode freefly`, freefly에서만 quit 대신 이동)
+- `←/→/↑/↓`: freefly 시점 회전 (`camera_look_speed` 반영)
 - `+` / `-`: stage level up/down (`0..4`)
-- `e` / `E`: exposure bias down/up
+- `e` / `E`: exposure bias down/up (`e`는 `--wasd-mode orbit`에서 사용)
 - `f`: center lock on/off toggle
 - `x` / `z`: orbit speed up/down
 - `[` / `]`: zoom out / zoom in
@@ -204,6 +227,17 @@ min_triangle_area_px2 = 0.08
 - `-` 연타로 저가시성이 지속되면 watchdog이 자동 복구(FullBody + framing reset + exposure 보정)
 - `center_lock=on`일 때 pan 키(`i/j/k/l/u/m`, 화살표)는 비활성화
 - 출력 I/O 실패가 누적되면 `ansi-truecolor -> ansi-q216 -> mono/full` 순서로 자동 폴백
+
+## Web Preview
+
+- `preview` 명령은 로컬 Three.js 비교 경로를 띄웁니다.
+- 기본 주소: `http://127.0.0.1:8787`
+- 동기화 채널:
+  - WebSocket `/sync` 20Hz 마스터 클럭 브로드캐스트
+  - 연결 불안정 시 HTTP `/sync` 폴링 자동 폴백
+- 클라이언트 보정 규칙:
+  - 오차 `> 120ms`: 즉시 스냅
+  - 그 외: `err * 0.15` 완만 보정
 
 ## Asset Policy
 

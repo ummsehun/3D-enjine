@@ -37,6 +37,12 @@ pub enum CenterLockMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraControlMode {
+    Orbit,
+    FreeFly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorMode {
     Mono,
     Ansi,
@@ -104,6 +110,20 @@ pub enum TextureSamplingMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraMode {
+    Off,
+    Vmd,
+    Blend,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraAlignPreset {
+    Std,
+    AltA,
+    AltB,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClarityProfile {
     Balanced,
     Sharp,
@@ -114,6 +134,15 @@ pub enum ClarityProfile {
 pub enum AnsiQuantization {
     Q216,
     Off,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FreeFlyState {
+    pub eye: Vec3,
+    pub target: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub move_speed: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +288,7 @@ pub struct MeshCpu {
     pub positions: Vec<Vec3>,
     pub normals: Vec<Vec3>,
     pub uv0: Option<Vec<Vec2>>,
+    pub uv1: Option<Vec<Vec2>>,
     pub colors_rgba: Option<Vec<[f32; 4]>>,
     pub material_index: Option<usize>,
     pub indices: Vec<[u32; 3]>,
@@ -290,10 +320,20 @@ pub enum MaterialAlphaMode {
     Blend,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct UvTransform2D {
+    pub offset: [f32; 2],
+    pub scale: [f32; 2],
+    pub rotation_rad: f32,
+    pub tex_coord_override: Option<u32>,
+}
+
 #[derive(Debug, Clone)]
 pub struct MaterialCpu {
     pub base_color_factor: [f32; 4],
     pub base_color_texture: Option<usize>,
+    pub base_color_tex_coord: u32,
+    pub base_color_uv_transform: Option<UvTransform2D>,
     pub emissive_factor: [f32; 3],
     pub alpha_mode: MaterialAlphaMode,
 }
@@ -344,6 +384,13 @@ pub struct MeshInstance {
     pub node_index: usize,
     pub skin_index: Option<usize>,
     pub default_morph_weights: Vec<f32>,
+    pub layer: MeshLayer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshLayer {
+    Subject,
+    Stage,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -455,6 +502,7 @@ pub fn cube_scene() -> SceneCpu {
         positions,
         normals,
         uv0: None,
+        uv1: None,
         colors_rgba: None,
         material_index: None,
         indices,
@@ -483,6 +531,7 @@ pub fn cube_scene() -> SceneCpu {
             node_index: 0,
             skin_index: None,
             default_morph_weights: Vec::new(),
+            layer: MeshLayer::Subject,
         }],
         animations: Vec::new(),
         root_center_node: Some(0),

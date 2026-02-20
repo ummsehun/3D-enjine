@@ -111,7 +111,7 @@ fn normalized_clip_time(elapsed_seconds: f32, duration: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::animation::{AnimationChannel, AnimationClip, ChannelValues, Interpolation};
-    use crate::scene::{MeshCpu, MeshInstance, MorphTargetCpu, Node, SceneCpu};
+    use crate::scene::{MeshCpu, MeshInstance, MeshLayer, MorphTargetCpu, Node, SceneCpu};
     use glam::{Quat, Vec3};
 
     #[test]
@@ -154,6 +154,7 @@ mod tests {
             positions: vec![Vec3::ZERO],
             normals: vec![Vec3::Y],
             uv0: None,
+            uv1: None,
             colors_rgba: None,
             material_index: None,
             indices: vec![[0, 0, 0]],
@@ -202,6 +203,7 @@ mod tests {
                 node_index: 0,
                 skin_index: None,
                 default_morph_weights: vec![0.0],
+                layer: MeshLayer::Subject,
             }],
             animations: vec![primary, facial],
             root_center_node: Some(0),

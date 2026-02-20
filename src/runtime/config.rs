@@ -4,9 +4,10 @@ use std::{
 };
 
 use crate::scene::{
-    AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraFocusMode, CellAspectMode,
-    CenterLockMode, CinematicCameraMode, ClarityProfile, ColorMode, ContrastProfile, DetailProfile,
-    PerfProfile, RenderBackend, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
+    AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
+    CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
+    ClarityProfile, ColorMode, ContrastProfile, DetailProfile, PerfProfile, RenderBackend,
+    SyncSpeedMode, TextureSamplingMode, ThemeStyle,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +38,14 @@ pub struct GasciiConfig {
     pub exposure_bias: f32,
     pub center_lock: bool,
     pub center_lock_mode: CenterLockMode,
+    pub wasd_mode: CameraControlMode,
+    pub freefly_speed: f32,
+    pub camera_look_speed: f32,
+    pub camera_mode: CameraMode,
+    pub camera_align_preset: CameraAlignPreset,
+    pub camera_unit_scale: f32,
+    pub camera_vmd_fps: f32,
+    pub camera_vmd_path: Option<PathBuf>,
     pub camera_focus: CameraFocusMode,
     pub material_color: bool,
     pub texture_sampling: TextureSamplingMode,
@@ -78,6 +87,14 @@ impl Default for GasciiConfig {
             exposure_bias: 0.0,
             center_lock: true,
             center_lock_mode: CenterLockMode::Root,
+            wasd_mode: CameraControlMode::FreeFly,
+            freefly_speed: 1.0,
+            camera_look_speed: 1.0,
+            camera_mode: CameraMode::Vmd,
+            camera_align_preset: CameraAlignPreset::Std,
+            camera_unit_scale: 0.08,
+            camera_vmd_fps: 30.0,
+            camera_vmd_path: None,
             camera_focus: CameraFocusMode::Auto,
             material_color: true,
             texture_sampling: TextureSamplingMode::Nearest,
@@ -327,6 +344,62 @@ pub fn load_gascii_config(path: &Path) -> GasciiConfig {
                     CenterLockMode::Root
                 };
             }
+            "wasd_mode" | "camera_control_mode" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.wasd_mode = if lower.starts_with("orb") {
+                    CameraControlMode::Orbit
+                } else {
+                    CameraControlMode::FreeFly
+                };
+            }
+            "freefly_speed" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    cfg.freefly_speed = parsed.clamp(0.1, 8.0);
+                }
+            }
+            "camera_look_speed" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    cfg.camera_look_speed = parsed.clamp(0.1, 8.0);
+                }
+            }
+            "camera_mode" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.camera_mode = if lower.starts_with("off") {
+                    CameraMode::Off
+                } else if lower.starts_with("blend") {
+                    CameraMode::Blend
+                } else {
+                    CameraMode::Vmd
+                };
+            }
+            "camera_align_preset" | "camera_preset" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.camera_align_preset = if lower.starts_with("alt-a") || lower == "alta" {
+                    CameraAlignPreset::AltA
+                } else if lower.starts_with("alt-b") || lower == "altb" {
+                    CameraAlignPreset::AltB
+                } else {
+                    CameraAlignPreset::Std
+                };
+            }
+            "camera_unit_scale" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    cfg.camera_unit_scale = parsed.clamp(0.01, 2.0);
+                }
+            }
+            "camera_vmd_fps" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    cfg.camera_vmd_fps = parsed.clamp(1.0, 240.0);
+                }
+            }
+            "camera_vmd_path" => {
+                let raw = value.trim().trim_matches('"').trim_matches('\'');
+                if raw.is_empty() {
+                    cfg.camera_vmd_path = None;
+                } else {
+                    cfg.camera_vmd_path = Some(PathBuf::from(raw));
+                }
+            }
             "camera_focus" | "camera_focus_mode" => {
                 let lower = value.to_ascii_lowercase();
                 cfg.camera_focus = if lower.starts_with("full") {
@@ -425,6 +498,14 @@ mod tests {
         assert!((cfg.exposure_bias - 0.0).abs() < 1e-6);
         assert!(cfg.center_lock);
         assert_eq!(cfg.center_lock_mode, CenterLockMode::Root);
+        assert_eq!(cfg.wasd_mode, CameraControlMode::FreeFly);
+        assert!((cfg.freefly_speed - 1.0).abs() < 1e-6);
+        assert!((cfg.camera_look_speed - 1.0).abs() < 1e-6);
+        assert_eq!(cfg.camera_mode, CameraMode::Vmd);
+        assert_eq!(cfg.camera_align_preset, CameraAlignPreset::Std);
+        assert!((cfg.camera_unit_scale - 0.08).abs() < 1e-6);
+        assert!((cfg.camera_vmd_fps - 30.0).abs() < 1e-6);
+        assert_eq!(cfg.camera_vmd_path, None);
         assert_eq!(cfg.camera_focus, CameraFocusMode::Auto);
         assert!(cfg.material_color);
         assert_eq!(cfg.texture_sampling, TextureSamplingMode::Nearest);
@@ -488,7 +569,7 @@ mod tests {
         let path = dir.path().join("Gascii.config");
         fs::write(
             &path,
-            "cell_aspect_mode = manual\ncell_aspect_trim = 1.15\ncontrast_profile = fixed\nsync_offset_ms = -120\nsync_speed_mode = realtime\ncolor_mode=ansi\nascii_force_color=false\nbraille_profile=normal\ntheme=holo\naudio_reactive=high\ncinematic_camera=aggressive\nreactive_gain=0.42\nperf_profile=smooth\ndetail_profile=ultra\nclarity_profile=extreme\nansi_quantization=off\nbackend=gpu-preview\nstage_dir=assets/stage\nstage_selection=world is mine\nexposure_bias=0.18\ncenter_lock=false\ncenter_lock_mode=mixed\ncamera_focus=face\nmaterial_color=off\ntexture_sampling=bilinear\nbraille_aspect_compensation=1.12\nmodel_lift=0.2\nedge_accent_strength=0.5\nbg_suppression=0.42\nstage_level=4\nstage_reactive=off\n",
+            "cell_aspect_mode = manual\ncell_aspect_trim = 1.15\ncontrast_profile = fixed\nsync_offset_ms = -120\nsync_speed_mode = realtime\ncolor_mode=ansi\nascii_force_color=false\nbraille_profile=normal\ntheme=holo\naudio_reactive=high\ncinematic_camera=aggressive\nreactive_gain=0.42\nperf_profile=smooth\ndetail_profile=ultra\nclarity_profile=extreme\nansi_quantization=off\nbackend=gpu-preview\nstage_dir=assets/stage\nstage_selection=world is mine\nexposure_bias=0.18\ncenter_lock=false\ncenter_lock_mode=mixed\nwasd_mode=orbit\nfreefly_speed=2.4\ncamera_look_speed=1.8\ncamera_mode=blend\ncamera_align_preset=alt-b\ncamera_unit_scale=0.12\ncamera_vmd_fps=60\ncamera_vmd_path=assets/camera/world_is_mine.vmd\ncamera_focus=face\nmaterial_color=off\ntexture_sampling=bilinear\nbraille_aspect_compensation=1.12\nmodel_lift=0.2\nedge_accent_strength=0.5\nbg_suppression=0.42\nstage_level=4\nstage_reactive=off\n",
         )
         .expect("write config");
 
@@ -510,6 +591,17 @@ mod tests {
         assert!((cfg.exposure_bias - 0.18).abs() < 1e-6);
         assert!(!cfg.center_lock);
         assert_eq!(cfg.center_lock_mode, CenterLockMode::Mixed);
+        assert_eq!(cfg.wasd_mode, CameraControlMode::Orbit);
+        assert!((cfg.freefly_speed - 2.4).abs() < 1e-6);
+        assert!((cfg.camera_look_speed - 1.8).abs() < 1e-6);
+        assert_eq!(cfg.camera_mode, CameraMode::Blend);
+        assert_eq!(cfg.camera_align_preset, CameraAlignPreset::AltB);
+        assert!((cfg.camera_unit_scale - 0.12).abs() < 1e-6);
+        assert!((cfg.camera_vmd_fps - 60.0).abs() < 1e-6);
+        assert_eq!(
+            cfg.camera_vmd_path.as_deref(),
+            Some(Path::new("assets/camera/world_is_mine.vmd"))
+        );
         assert_eq!(cfg.camera_focus, CameraFocusMode::Face);
         assert!(!cfg.material_color);
         assert_eq!(cfg.texture_sampling, TextureSamplingMode::Bilinear);

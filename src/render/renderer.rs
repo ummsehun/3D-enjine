@@ -4,7 +4,8 @@ use std::fmt::Write as _;
 use crate::math::{depth_less, perspective_matrix};
 use crate::scene::{
     AnsiQuantization, BrailleProfile, ClarityProfile, ColorMode, ContrastProfile, DEFAULT_CHARSET,
-    DetailProfile, MeshCpu, RenderConfig, RenderMode, SceneCpu, TextureSamplingMode, ThemeStyle,
+    DetailProfile, MeshCpu, MeshLayer, RenderConfig, RenderMode, SceneCpu, TextureSamplingMode,
+    ThemeStyle, UvTransform2D,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -161,6 +162,10 @@ pub struct RenderStats {
     pub visible_bbox_px: Option<(u16, u16, u16, u16)>,
     pub visible_bbox_aspect: f32,
     pub visible_height_ratio: f32,
+    pub subject_visible_ratio: f32,
+    pub subject_visible_height_ratio: f32,
+    pub subject_centroid_px: Option<(f32, f32)>,
+    pub subject_bbox_px: Option<(u16, u16, u16, u16)>,
 }
 
 const BACKGROUND_ASCII: [char; 4] = [' ', ' ', '.', ':'];
@@ -448,6 +453,7 @@ fn sample_material_albedo(
     scene: &SceneCpu,
     material_index: Option<usize>,
     uv0: Vec2,
+    uv1: Vec2,
     vertex_color: [f32; 4],
     config: &RenderConfig,
 ) -> [f32; 3] {
@@ -467,10 +473,22 @@ fn sample_material_albedo(
         color[3] *= material.base_color_factor[3];
         if let Some(texture_index) = material.base_color_texture {
             if let Some(texture) = scene.textures.get(texture_index) {
-                let sampled = sample_texture_rgba(texture, uv0, config.texture_sampling);
-                color[0] *= sampled[0];
-                color[1] *= sampled[1];
-                color[2] *= sampled[2];
+                let mut selected_uv = match material
+                    .base_color_uv_transform
+                    .and_then(|transform| transform.tex_coord_override)
+                    .unwrap_or(material.base_color_tex_coord)
+                {
+                    0 => uv0,
+                    1 => uv1,
+                    _ => uv0,
+                };
+                if let Some(transform) = material.base_color_uv_transform {
+                    selected_uv = apply_uv_transform(selected_uv, transform);
+                }
+                let sampled = sample_texture_rgba(texture, selected_uv, config.texture_sampling);
+                color[0] *= srgb_to_linear(sampled[0]);
+                color[1] *= srgb_to_linear(sampled[1]);
+                color[2] *= srgb_to_linear(sampled[2]);
                 color[3] *= sampled[3];
             }
         }
@@ -480,6 +498,19 @@ fn sample_material_albedo(
         color[1].clamp(0.0, 1.0),
         color[2].clamp(0.0, 1.0),
     ]
+}
+
+fn apply_uv_transform(uv: Vec2, transform: UvTransform2D) -> Vec2 {
+    let scaled = Vec2::new(uv.x * transform.scale[0], uv.y * transform.scale[1]);
+    let (sin_t, cos_t) = transform.rotation_rad.sin_cos();
+    let rotated = Vec2::new(
+        scaled.x * cos_t - scaled.y * sin_t,
+        scaled.x * sin_t + scaled.y * cos_t,
+    );
+    Vec2::new(
+        rotated.x + transform.offset[0],
+        rotated.y + transform.offset[1],
+    )
 }
 
 fn sample_texture_rgba(
@@ -581,9 +612,15 @@ fn scale_rgb(rgb: [f32; 3], scale: f32) -> [f32; 3] {
 
 fn to_display_rgb(rgb: [f32; 3]) -> [u8; 3] {
     [
-        (rgb[0].powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u8,
-        (rgb[1].powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u8,
-        (rgb[2].powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u8,
+        (linear_to_srgb(rgb[0]).clamp(0.0, 1.0) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8,
+        (linear_to_srgb(rgb[1]).clamp(0.0, 1.0) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8,
+        (linear_to_srgb(rgb[2]).clamp(0.0, 1.0) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8,
     ]
 }
 
@@ -591,15 +628,33 @@ fn color_scale_from_tonemap(base_luma: f32, target_intensity: f32) -> f32 {
     if base_luma <= 1e-4 {
         target_intensity.max(0.12)
     } else {
-        (target_intensity / base_luma).clamp(0.35, 3.1)
+        (target_intensity / base_luma).clamp(0.35, 2.6)
     }
 }
 
 fn clarity_saturation_gain(clarity: ClarityProfile) -> f32 {
     match clarity {
         ClarityProfile::Balanced => 1.00,
-        ClarityProfile::Sharp => 1.08,
-        ClarityProfile::Extreme => 1.16,
+        ClarityProfile::Sharp => 1.04,
+        ClarityProfile::Extreme => 1.10,
+    }
+}
+
+fn srgb_to_linear(c: f32) -> f32 {
+    let v = c.clamp(0.0, 1.0);
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(c: f32) -> f32 {
+    let v = c.max(0.0);
+    if v <= 0.003_130_8 {
+        12.92 * v
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
     }
 }
 
@@ -739,6 +794,7 @@ struct ProjectedVertex {
     world_pos: Vec3,
     world_normal: Vec3,
     uv0: Vec2,
+    uv1: Vec2,
     vertex_color: [f32; 4],
     material_index: Option<usize>,
 }
@@ -842,6 +898,8 @@ fn render_frame_ascii(
     let mut stats = RenderStats::default();
     let mut histogram = [0_u32; 64];
     let mut histogram_count = 0_u32;
+    let mut subject_depth_cells =
+        vec![f32::INFINITY; usize::from(frame.width).saturating_mul(usize::from(frame.height))];
     if let Some((x, y, depth)) = project_root_screen(
         scene,
         global_matrices,
@@ -896,6 +954,8 @@ fn render_frame_ascii(
             exposure,
             &mut histogram,
             &mut histogram_count,
+            subject_depth_cells.as_mut_slice(),
+            matches!(instance.layer, MeshLayer::Subject),
         );
     }
     update_exposure_from_histogram(
@@ -904,7 +964,13 @@ fn render_frame_ascii(
         histogram_count,
         config.clarity_profile,
     );
-    apply_visible_metrics(&mut stats, frame);
+    apply_visible_metrics(
+        &mut stats,
+        frame,
+        subject_depth_cells.as_slice(),
+        frame.width,
+        frame.height,
+    );
     stats
 }
 
@@ -955,6 +1021,8 @@ fn render_frame_braille(
     let mut histogram = [0_u32; 64];
     let mut histogram_count = 0_u32;
     let mut stats = RenderStats::default();
+    let mut subject_depth_cells =
+        vec![f32::INFINITY; usize::from(frame.width).saturating_mul(usize::from(frame.height))];
     if let Some((x, y, depth)) = project_root_screen(
         scene,
         global_matrices,
@@ -1015,6 +1083,9 @@ fn render_frame_braille(
             threshold,
             &mut histogram,
             &mut histogram_count,
+            subject_depth_cells.as_mut_slice(),
+            matches!(instance.layer, MeshLayer::Subject),
+            frame.width,
         );
     }
     update_exposure_from_histogram(
@@ -1030,7 +1101,13 @@ fn render_frame_braille(
         palette,
         threshold,
     );
-    apply_visible_metrics(&mut stats, frame);
+    apply_visible_metrics(
+        &mut stats,
+        frame,
+        subject_depth_cells.as_slice(),
+        frame.width,
+        frame.height,
+    );
     update_safe_visibility_state(scratch, config.braille_profile, stats.visible_cell_ratio);
     stats
 }
@@ -1082,6 +1159,11 @@ fn project_mesh_vertices(
             .as_ref()
             .and_then(|values| values.get(index).copied())
             .unwrap_or(Vec2::ZERO);
+        let uv1 = mesh
+            .uv1
+            .as_ref()
+            .and_then(|values| values.get(index).copied())
+            .unwrap_or(uv0);
         let vertex_color = mesh
             .colors_rgba
             .as_ref()
@@ -1093,6 +1175,7 @@ fn project_mesh_vertices(
             world_pos,
             world_normal,
             uv0,
+            uv1,
             vertex_color,
             material_index: mesh.material_index,
         });
@@ -1197,6 +1280,8 @@ fn rasterize_mesh(
     exposure: f32,
     histogram: &mut [u32; 64],
     histogram_count: &mut u32,
+    subject_depth_cells: &mut [f32],
+    is_subject_layer: bool,
 ) {
     let width = i32::from(frame.width);
     let height = i32::from(frame.height);
@@ -1293,11 +1378,17 @@ fn rasterize_mesh(
                 let idx = (y as usize) * width_usize + (x as usize);
                 if depth_less(frame.depth[idx], depth) {
                     frame.depth[idx] = depth;
+                    if is_subject_layer && idx < subject_depth_cells.len() {
+                        if depth_less(subject_depth_cells[idx], depth) {
+                            subject_depth_cells[idx] = depth;
+                        }
+                    }
                     let world_pos = v0.world_pos * w0 + v1.world_pos * w1 + v2.world_pos * w2;
                     let world_normal =
                         (v0.world_normal * w0 + v1.world_normal * w1 + v2.world_normal * w2)
                             .normalize_or_zero();
                     let uv0 = v0.uv0 * w0 + v1.uv0 * w1 + v2.uv0 * w2;
+                    let uv1 = v0.uv1 * w0 + v1.uv1 * w1 + v2.uv1 * w2;
                     let vertex_color = [
                         v0.vertex_color[0] * w0 + v1.vertex_color[0] * w1 + v2.vertex_color[0] * w2,
                         v0.vertex_color[1] * w0 + v1.vertex_color[1] * w1 + v2.vertex_color[1] * w2,
@@ -1308,8 +1399,14 @@ fn rasterize_mesh(
                         .material_index
                         .or(v1.material_index)
                         .or(v2.material_index);
-                    let albedo =
-                        sample_material_albedo(scene, material_index, uv0, vertex_color, config);
+                    let albedo = sample_material_albedo(
+                        scene,
+                        material_index,
+                        uv0,
+                        uv1,
+                        vertex_color,
+                        config,
+                    );
                     let lighting = shade_lighting(world_normal, world_pos, shading).clamp(0.0, 1.0);
                     let view_dir = (shading.camera_pos - world_pos).normalize_or_zero();
                     let edge_factor = (1.0 - world_normal.dot(view_dir).abs()).powf(1.6);
@@ -1366,6 +1463,9 @@ fn rasterize_braille_mesh(
     threshold: BrailleThresholds,
     histogram: &mut [u32; 64],
     histogram_count: &mut u32,
+    subject_depth_cells: &mut [f32],
+    is_subject_layer: bool,
+    cell_width: u16,
 ) {
     let width = i32::from(subpixels.width);
     let height = i32::from(subpixels.height);
@@ -1457,11 +1557,23 @@ fn rasterize_braille_mesh(
                 let idx = (y as usize) * width_usize + (x as usize);
                 if depth_less(subpixels.depth[idx], depth) {
                     subpixels.depth[idx] = depth;
+                    if is_subject_layer {
+                        let cell_x = (x as usize) / 2;
+                        let cell_y = (y as usize) / 4;
+                        let fw = usize::from(cell_width.max(1));
+                        let cidx = cell_y.saturating_mul(fw).saturating_add(cell_x);
+                        if cidx < subject_depth_cells.len()
+                            && depth_less(subject_depth_cells[cidx], depth)
+                        {
+                            subject_depth_cells[cidx] = depth;
+                        }
+                    }
                     let world_pos = v0.world_pos * w0 + v1.world_pos * w1 + v2.world_pos * w2;
                     let world_normal =
                         (v0.world_normal * w0 + v1.world_normal * w1 + v2.world_normal * w2)
                             .normalize_or_zero();
                     let uv0 = v0.uv0 * w0 + v1.uv0 * w1 + v2.uv0 * w2;
+                    let uv1 = v0.uv1 * w0 + v1.uv1 * w1 + v2.uv1 * w2;
                     let vertex_color = [
                         v0.vertex_color[0] * w0 + v1.vertex_color[0] * w1 + v2.vertex_color[0] * w2,
                         v0.vertex_color[1] * w0 + v1.vertex_color[1] * w1 + v2.vertex_color[1] * w2,
@@ -1472,8 +1584,14 @@ fn rasterize_braille_mesh(
                         .material_index
                         .or(v1.material_index)
                         .or(v2.material_index);
-                    let albedo =
-                        sample_material_albedo(scene, material_index, uv0, vertex_color, config);
+                    let albedo = sample_material_albedo(
+                        scene,
+                        material_index,
+                        uv0,
+                        uv1,
+                        vertex_color,
+                        config,
+                    );
                     let lighting = shade_lighting(world_normal, world_pos, shading).clamp(0.0, 1.0);
                     let view_dir = (shading.camera_pos - world_pos).normalize_or_zero();
                     let edge_factor = (1.0 - world_normal.dot(view_dir).abs()).powf(1.6);
@@ -1745,12 +1863,22 @@ fn visible_cell_ratio(frame: &FrameBuffers) -> f32 {
     (visible as f32) / (total as f32)
 }
 
-fn apply_visible_metrics(stats: &mut RenderStats, frame: &FrameBuffers) {
+fn apply_visible_metrics(
+    stats: &mut RenderStats,
+    frame: &FrameBuffers,
+    subject_depth_cells: &[f32],
+    frame_width: u16,
+    frame_height: u16,
+) {
     stats.visible_cell_ratio = visible_cell_ratio(frame);
     stats.visible_centroid_px = stats.root_screen_px;
     stats.visible_bbox_px = None;
     stats.visible_bbox_aspect = 0.0;
     stats.visible_height_ratio = 0.0;
+    stats.subject_visible_ratio = 0.0;
+    stats.subject_visible_height_ratio = 0.0;
+    stats.subject_centroid_px = None;
+    stats.subject_bbox_px = None;
     if frame.width == 0 || frame.height == 0 {
         return;
     }
@@ -1802,6 +1930,53 @@ fn apply_visible_metrics(stats: &mut RenderStats, frame: &FrameBuffers) {
         0.0
     };
     stats.visible_height_ratio = (bbox_h / (frame.height as f32)).clamp(0.0, 1.0);
+
+    let fw = usize::from(frame_width.max(1));
+    let fh = usize::from(frame_height.max(1));
+    if subject_depth_cells.len() < fw.saturating_mul(fh) {
+        return;
+    }
+    let mut subject_visible = 0usize;
+    let mut subject_sum_x = 0.0f32;
+    let mut subject_sum_y = 0.0f32;
+    let mut smin_x = fw;
+    let mut smin_y = fh;
+    let mut smax_x = 0usize;
+    let mut smax_y = 0usize;
+    for y in 0..fh {
+        for x in 0..fw {
+            let idx = y * fw + x;
+            if !subject_depth_cells[idx].is_finite() {
+                continue;
+            }
+            subject_visible = subject_visible.saturating_add(1);
+            subject_sum_x += x as f32 + 0.5;
+            subject_sum_y += y as f32 + 0.5;
+            smin_x = smin_x.min(x);
+            smin_y = smin_y.min(y);
+            smax_x = smax_x.max(x);
+            smax_y = smax_y.max(y);
+        }
+    }
+    if subject_visible == 0 {
+        return;
+    }
+    stats.subject_visible_ratio = (subject_visible as f32) / (fw.saturating_mul(fh).max(1) as f32);
+    let sbbox_h = (smax_y.saturating_sub(smin_y) + 1) as f32;
+    stats.subject_visible_height_ratio = (sbbox_h / (fh as f32)).clamp(0.0, 1.0);
+    stats.subject_centroid_px = Some((
+        subject_sum_x / subject_visible as f32,
+        subject_sum_y / subject_visible as f32,
+    ));
+    stats.subject_bbox_px = Some((
+        smin_x as u16,
+        smin_y as u16,
+        smax_x.min(fw.saturating_sub(1)) as u16,
+        smax_y.min(fh.saturating_sub(1)) as u16,
+    ));
+    if stats.visible_centroid_px.is_none() {
+        stats.visible_centroid_px = stats.subject_centroid_px;
+    }
 }
 
 fn perp_dot(a: Vec2, b: Vec2) -> f32 {

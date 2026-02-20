@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::scene::{
-    AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraFocusMode, CellAspectMode,
-    CenterLockMode, CinematicCameraMode, ClarityProfile, ColorMode, ContrastProfile,
-    DEFAULT_CHARSET, DetailProfile, PerfProfile, RenderBackend, RenderMode, SyncSpeedMode,
-    TextureSamplingMode, ThemeStyle,
+    AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
+    CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
+    ClarityProfile, ColorMode, ContrastProfile, DEFAULT_CHARSET, DetailProfile, PerfProfile,
+    RenderBackend, RenderMode, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
 };
 
 #[derive(Debug, Parser)]
@@ -26,6 +26,8 @@ pub enum Commands {
     Start(StartArgs),
     /// Run interactive terminal rendering for cube/OBJ/GLB scenes.
     Run(RunArgs),
+    /// Launch web preview server (Three.js reference path).
+    Preview(PreviewArgs),
     /// Benchmark a scene pipeline without terminal presentation.
     Bench(BenchArgs),
     /// Inspect GLB/glTF scene structure.
@@ -49,6 +51,17 @@ pub struct StartArgs {
     /// Animation selector by name or index. Defaults to first clip if available.
     #[arg(long)]
     pub anim: Option<String>,
+    /// Optional camera VMD track path.
+    #[arg(long)]
+    pub camera_vmd: Option<PathBuf>,
+    #[arg(long, value_enum)]
+    pub camera_mode: Option<CameraModeArg>,
+    #[arg(long, value_enum)]
+    pub camera_align_preset: Option<CameraAlignPresetArg>,
+    #[arg(long)]
+    pub camera_unit_scale: Option<f32>,
+    #[arg(long)]
+    pub camera_vmd_fps: Option<f32>,
     #[arg(long, value_enum, default_value_t = ModeArg::Braille)]
     pub mode: ModeArg,
     #[arg(long, value_enum)]
@@ -79,6 +92,12 @@ pub struct StartArgs {
     pub center_lock: Option<ToggleArg>,
     #[arg(long, value_enum)]
     pub center_lock_mode: Option<CenterLockModeArg>,
+    #[arg(long, value_enum)]
+    pub wasd_mode: Option<WasdModeArg>,
+    #[arg(long)]
+    pub freefly_speed: Option<f32>,
+    #[arg(long)]
+    pub camera_look_speed: Option<f32>,
     #[arg(long, value_enum)]
     pub camera_focus: Option<CameraFocusArg>,
     #[arg(long, value_enum)]
@@ -158,6 +177,17 @@ pub struct RunArgs {
     /// Animation selector by name or index.
     #[arg(long)]
     pub anim: Option<String>,
+    /// Optional camera VMD track path.
+    #[arg(long)]
+    pub camera_vmd: Option<PathBuf>,
+    #[arg(long, value_enum)]
+    pub camera_mode: Option<CameraModeArg>,
+    #[arg(long, value_enum)]
+    pub camera_align_preset: Option<CameraAlignPresetArg>,
+    #[arg(long)]
+    pub camera_unit_scale: Option<f32>,
+    #[arg(long)]
+    pub camera_vmd_fps: Option<f32>,
     #[arg(long, value_enum, default_value_t = ModeArg::Braille)]
     pub mode: ModeArg,
     #[arg(long, value_enum)]
@@ -188,6 +218,12 @@ pub struct RunArgs {
     pub center_lock: Option<ToggleArg>,
     #[arg(long, value_enum)]
     pub center_lock_mode: Option<CenterLockModeArg>,
+    #[arg(long, value_enum)]
+    pub wasd_mode: Option<WasdModeArg>,
+    #[arg(long)]
+    pub freefly_speed: Option<f32>,
+    #[arg(long)]
+    pub camera_look_speed: Option<f32>,
     #[arg(long, value_enum)]
     pub camera_focus: Option<CameraFocusArg>,
     #[arg(long, value_enum)]
@@ -341,6 +377,29 @@ pub struct BenchArgs {
 }
 
 #[derive(Debug, clap::Args)]
+pub struct PreviewArgs {
+    /// Path to .glb or .gltf.
+    #[arg(long)]
+    pub glb: PathBuf,
+    /// Optional animation selector by name or index.
+    #[arg(long)]
+    pub anim: Option<String>,
+    /// Optional camera VMD track path.
+    #[arg(long)]
+    pub camera_vmd: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = CameraModeArg::Vmd)]
+    pub camera_mode: CameraModeArg,
+    #[arg(long, value_enum, default_value_t = CameraAlignPresetArg::Std)]
+    pub camera_align_preset: CameraAlignPresetArg,
+    #[arg(long, default_value_t = 0.08)]
+    pub camera_unit_scale: f32,
+    #[arg(long, default_value_t = 30.0)]
+    pub camera_vmd_fps: f32,
+    #[arg(long, default_value_t = 8787)]
+    pub port: u16,
+}
+
+#[derive(Debug, clap::Args)]
 pub struct InspectArgs {
     /// Path to .glb or .gltf file.
     #[arg(long)]
@@ -460,6 +519,28 @@ pub enum CameraFocusArg {
     Upper,
     Face,
     Hands,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum WasdModeArg {
+    Orbit,
+    Freefly,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CameraModeArg {
+    Off,
+    Vmd,
+    Blend,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CameraAlignPresetArg {
+    Std,
+    #[value(name = "alt-a")]
+    AltA,
+    #[value(name = "alt-b")]
+    AltB,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -602,6 +683,35 @@ impl From<CameraFocusArg> for CameraFocusMode {
             CameraFocusArg::Upper => CameraFocusMode::Upper,
             CameraFocusArg::Face => CameraFocusMode::Face,
             CameraFocusArg::Hands => CameraFocusMode::Hands,
+        }
+    }
+}
+
+impl From<WasdModeArg> for CameraControlMode {
+    fn from(value: WasdModeArg) -> Self {
+        match value {
+            WasdModeArg::Orbit => CameraControlMode::Orbit,
+            WasdModeArg::Freefly => CameraControlMode::FreeFly,
+        }
+    }
+}
+
+impl From<CameraModeArg> for CameraMode {
+    fn from(value: CameraModeArg) -> Self {
+        match value {
+            CameraModeArg::Off => CameraMode::Off,
+            CameraModeArg::Vmd => CameraMode::Vmd,
+            CameraModeArg::Blend => CameraMode::Blend,
+        }
+    }
+}
+
+impl From<CameraAlignPresetArg> for CameraAlignPreset {
+    fn from(value: CameraAlignPresetArg) -> Self {
+        match value {
+            CameraAlignPresetArg::Std => CameraAlignPreset::Std,
+            CameraAlignPresetArg::AltA => CameraAlignPreset::AltA,
+            CameraAlignPresetArg::AltB => CameraAlignPreset::AltB,
         }
     }
 }

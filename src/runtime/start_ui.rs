@@ -21,17 +21,18 @@ use crate::{
     loader,
     runtime::{config::UiLanguage, terminal::RatatuiSession},
     scene::{
-        AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraFocusMode, CellAspectMode,
-        CenterLockMode, CinematicCameraMode, ClarityProfile, ColorMode, ContrastProfile,
-        DetailProfile, PerfProfile, RenderBackend, RenderConfig, RenderMode, SyncSpeedMode,
-        TextureSamplingMode, ThemeStyle, estimate_cell_aspect_from_window, resolve_cell_aspect,
+        AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraControlMode, CameraFocusMode,
+        CellAspectMode, CenterLockMode, CinematicCameraMode, ClarityProfile, ColorMode,
+        ContrastProfile, DetailProfile, PerfProfile, RenderBackend, RenderConfig, RenderMode,
+        SyncSpeedMode, TextureSamplingMode, ThemeStyle, estimate_cell_aspect_from_window,
+        resolve_cell_aspect,
     },
 };
 
 const MIN_WIDTH: u16 = 60;
 const MIN_HEIGHT: u16 = 18;
 const START_FPS_OPTIONS: [u32; 9] = [0, 15, 20, 24, 30, 40, 60, 90, 120];
-const RENDER_FIELD_COUNT: usize = 26;
+const RENDER_FIELD_COUNT: usize = 28;
 const SYNC_OFFSET_STEP_MS: i32 = 10;
 const SYNC_OFFSET_LIMIT_MS: i32 = 5_000;
 
@@ -115,6 +116,8 @@ pub struct StartWizardDefaults {
     pub backend: RenderBackend,
     pub center_lock: bool,
     pub center_lock_mode: CenterLockMode,
+    pub wasd_mode: CameraControlMode,
+    pub freefly_speed: f32,
     pub camera_focus: CameraFocusMode,
     pub material_color: bool,
     pub texture_sampling: TextureSamplingMode,
@@ -150,6 +153,8 @@ impl Default for StartWizardDefaults {
             backend: RenderBackend::Cpu,
             center_lock: true,
             center_lock_mode: CenterLockMode::Root,
+            wasd_mode: CameraControlMode::FreeFly,
+            freefly_speed: 1.0,
             camera_focus: CameraFocusMode::Auto,
             material_color: true,
             texture_sampling: TextureSamplingMode::Nearest,
@@ -188,6 +193,8 @@ pub struct StartSelection {
     pub backend: RenderBackend,
     pub center_lock: bool,
     pub center_lock_mode: CenterLockMode,
+    pub wasd_mode: CameraControlMode,
+    pub freefly_speed: f32,
     pub camera_focus: CameraFocusMode,
     pub material_color: bool,
     pub texture_sampling: TextureSamplingMode,
@@ -258,6 +265,8 @@ struct StartWizardState {
     backend: RenderBackend,
     center_lock: bool,
     center_lock_mode: CenterLockMode,
+    wasd_mode: CameraControlMode,
+    freefly_speed: f32,
     camera_focus: CameraFocusMode,
     material_color: bool,
     texture_sampling: TextureSamplingMode,
@@ -313,6 +322,8 @@ impl StartWizardState {
             backend: defaults.backend,
             center_lock: defaults.center_lock,
             center_lock_mode: defaults.center_lock_mode,
+            wasd_mode: defaults.wasd_mode,
+            freefly_speed: defaults.freefly_speed.clamp(0.1, 8.0),
             camera_focus: defaults.camera_focus,
             material_color: defaults.material_color,
             texture_sampling: defaults.texture_sampling,
@@ -639,6 +650,16 @@ impl StartWizardState {
                 };
             }
             8 => {
+                self.wasd_mode = match self.wasd_mode {
+                    CameraControlMode::Orbit => CameraControlMode::FreeFly,
+                    CameraControlMode::FreeFly => CameraControlMode::Orbit,
+                };
+            }
+            9 => {
+                let step = 0.1 * (delta as f32);
+                self.freefly_speed = (self.freefly_speed + step).clamp(0.1, 8.0);
+            }
+            10 => {
                 self.camera_focus = match self.camera_focus {
                     CameraFocusMode::Auto => CameraFocusMode::Full,
                     CameraFocusMode::Full => CameraFocusMode::Upper,
@@ -647,28 +668,28 @@ impl StartWizardState {
                     CameraFocusMode::Hands => CameraFocusMode::Auto,
                 };
             }
-            9 => {
+            11 => {
                 self.material_color = !self.material_color;
             }
-            10 => {
+            12 => {
                 self.texture_sampling = match self.texture_sampling {
                     TextureSamplingMode::Nearest => TextureSamplingMode::Bilinear,
                     TextureSamplingMode::Bilinear => TextureSamplingMode::Nearest,
                 };
             }
-            11 => {
+            13 => {
                 let step = 0.01 * (delta as f32);
                 self.model_lift = (self.model_lift + step).clamp(0.02, 0.45);
             }
-            12 => {
+            14 => {
                 let step = 0.05 * (delta as f32);
                 self.edge_accent_strength = (self.edge_accent_strength + step).clamp(0.0, 1.5);
             }
-            13 => {
+            15 => {
                 let value = (self.stage_level as i32 + delta).clamp(0, 4);
                 self.stage_level = value as u8;
             }
-            14 => {
+            16 => {
                 if matches!(self.mode, RenderMode::Braille) {
                     self.color_mode = match self.color_mode {
                         ColorMode::Mono => ColorMode::Ansi,
@@ -678,64 +699,64 @@ impl StartWizardState {
                     self.color_mode = ColorMode::Ansi;
                 }
             }
-            15 => {
+            17 => {
                 self.braille_profile = match self.braille_profile {
                     BrailleProfile::Safe => BrailleProfile::Normal,
                     BrailleProfile::Normal => BrailleProfile::Dense,
                     BrailleProfile::Dense => BrailleProfile::Safe,
                 };
             }
-            16 => {
+            18 => {
                 self.theme_style = match self.theme_style {
                     ThemeStyle::Theater => ThemeStyle::Neon,
                     ThemeStyle::Neon => ThemeStyle::Holo,
                     ThemeStyle::Holo => ThemeStyle::Theater,
                 };
             }
-            17 => {
+            19 => {
                 self.audio_reactive = match self.audio_reactive {
                     AudioReactiveMode::Off => AudioReactiveMode::On,
                     AudioReactiveMode::On => AudioReactiveMode::High,
                     AudioReactiveMode::High => AudioReactiveMode::Off,
                 };
             }
-            18 => {
+            20 => {
                 self.cinematic_camera = match self.cinematic_camera {
                     CinematicCameraMode::Off => CinematicCameraMode::On,
                     CinematicCameraMode::On => CinematicCameraMode::Aggressive,
                     CinematicCameraMode::Aggressive => CinematicCameraMode::Off,
                 };
             }
-            19 => {
+            21 => {
                 let step = 0.05 * (delta as f32);
                 self.reactive_gain = (self.reactive_gain + step).clamp(0.0, 1.0);
             }
-            20 => cycle_index(&mut self.fps_index, START_FPS_OPTIONS.len(), delta),
-            21 => {
+            22 => cycle_index(&mut self.fps_index, START_FPS_OPTIONS.len(), delta),
+            23 => {
                 self.contrast_profile = match self.contrast_profile {
                     ContrastProfile::Adaptive => ContrastProfile::Fixed,
                     ContrastProfile::Fixed => ContrastProfile::Adaptive,
                 }
             }
-            22 => {
+            24 => {
                 let next = self
                     .sync_offset_ms
                     .saturating_add(delta.saturating_mul(SYNC_OFFSET_STEP_MS));
                 self.sync_offset_ms = next.clamp(-SYNC_OFFSET_LIMIT_MS, SYNC_OFFSET_LIMIT_MS);
             }
-            23 => {
+            25 => {
                 self.sync_speed_mode = match self.sync_speed_mode {
                     SyncSpeedMode::AutoDurationFit => SyncSpeedMode::Realtime1x,
                     SyncSpeedMode::Realtime1x => SyncSpeedMode::AutoDurationFit,
                 }
             }
-            24 => {
+            26 => {
                 self.cell_aspect_mode = match self.cell_aspect_mode {
                     CellAspectMode::Auto => CellAspectMode::Manual,
                     CellAspectMode::Manual => CellAspectMode::Auto,
                 }
             }
-            25 => {
+            27 => {
                 self.font_preset_enabled = !self.font_preset_enabled;
             }
             _ => {}
@@ -760,6 +781,8 @@ impl StartWizardState {
             backend: self.backend,
             center_lock: self.center_lock,
             center_lock_mode: self.center_lock_mode,
+            wasd_mode: self.wasd_mode,
+            freefly_speed: self.freefly_speed,
             camera_focus: self.camera_focus,
             material_color: self.material_color,
             texture_sampling: self.texture_sampling,
@@ -1247,6 +1270,10 @@ fn draw_render_options(
         CameraFocusMode::Face => tr(ui_language, "얼굴", "Face"),
         CameraFocusMode::Hands => tr(ui_language, "손", "Hands"),
     };
+    let wasd_mode = match state.wasd_mode {
+        CameraControlMode::Orbit => tr(ui_language, "오빗", "Orbit"),
+        CameraControlMode::FreeFly => tr(ui_language, "자유이동", "FreeFly"),
+    };
     let material_color = if state.material_color {
         tr(ui_language, "켜짐", "On")
     } else {
@@ -1289,6 +1316,16 @@ fn draw_render_options(
             "{}: {}",
             tr(ui_language, "중앙 고정 기준", "Center Lock Mode"),
             center_lock_mode
+        ),
+        format!(
+            "{}: {}",
+            tr(ui_language, "WASD 모드", "WASD Mode"),
+            wasd_mode
+        ),
+        format!(
+            "{}: {:.2}",
+            tr(ui_language, "자유이동 속도", "FreeFly Speed"),
+            state.freefly_speed
         ),
         format!(
             "{}: {}",
@@ -1530,6 +1567,10 @@ fn draw_confirm_panel(
         CinematicCameraMode::On => "On",
         CinematicCameraMode::Aggressive => "Aggressive",
     };
+    let wasd_mode = match selection.wasd_mode {
+        CameraControlMode::Orbit => "Orbit",
+        CameraControlMode::FreeFly => "FreeFly",
+    };
     let clarity_profile = match selection.clarity_profile {
         ClarityProfile::Balanced => "Balanced",
         ClarityProfile::Sharp => "Sharp",
@@ -1599,6 +1640,12 @@ fn draw_confirm_panel(
             "{}: {:?}",
             tr(ui_language, "카메라 포커스", "Camera Focus"),
             selection.camera_focus
+        )),
+        Line::raw(format!(
+            "{}: {} ({:.2})",
+            tr(ui_language, "WASD 모드/속도", "WASD Mode/Speed"),
+            wasd_mode,
+            selection.freefly_speed
         )),
         Line::raw(format!(
             "{}: {} / {:?}",
@@ -1793,6 +1840,12 @@ fn draw_summary_panel(
             "{}: {:?}",
             tr(ui_language, "카메라 포커스", "Camera Focus"),
             selection.camera_focus
+        )),
+        Line::raw(format!(
+            "{}: {:?} ({:.2})",
+            tr(ui_language, "WASD 모드/속도", "WASD Mode/Speed"),
+            selection.wasd_mode,
+            selection.freefly_speed
         )),
         Line::raw(format!(
             "{}: {} / {:?}",

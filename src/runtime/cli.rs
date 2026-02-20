@@ -5,8 +5,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crate::scene::{
     AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
     CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
-    ClarityProfile, ColorMode, ContrastProfile, DEFAULT_CHARSET, DetailProfile, PerfProfile,
-    RenderBackend, RenderMode, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
+    ClarityProfile, ColorMode, ContrastProfile, DEFAULT_CHARSET, DetailProfile, GraphicsProtocol,
+    PerfProfile, RenderBackend, RenderMode, RenderOutputMode, SyncPolicy, SyncSpeedMode,
+    TextureSamplingMode, ThemeStyle,
 };
 
 #[derive(Debug, Parser)]
@@ -28,6 +29,8 @@ pub enum Commands {
     Run(RunArgs),
     /// Launch web preview server (Three.js reference path).
     Preview(PreviewArgs),
+    /// Preprocess GLB textures (upscale/sharpen) and write optimized output.
+    Preprocess(PreprocessArgs),
     /// Benchmark a scene pipeline without terminal presentation.
     Bench(BenchArgs),
     /// Inspect GLB/glTF scene structure.
@@ -51,6 +54,12 @@ pub struct StartArgs {
     /// Animation selector by name or index. Defaults to first clip if available.
     #[arg(long)]
     pub anim: Option<String>,
+    /// Directory to scan for camera .vmd files.
+    #[arg(long, default_value = "assets/camera")]
+    pub camera_dir: PathBuf,
+    /// Camera selector: none | auto | <name> | <path>
+    #[arg(long)]
+    pub camera: Option<String>,
     /// Optional camera VMD track path.
     #[arg(long)]
     pub camera_vmd: Option<PathBuf>,
@@ -64,6 +73,12 @@ pub struct StartArgs {
     pub camera_vmd_fps: Option<f32>,
     #[arg(long, value_enum, default_value_t = ModeArg::Braille)]
     pub mode: ModeArg,
+    #[arg(long, value_enum)]
+    pub output_mode: Option<OutputModeArg>,
+    #[arg(long, value_enum)]
+    pub recover_color: Option<RecoverColorArg>,
+    #[arg(long, value_enum)]
+    pub graphics_protocol: Option<GraphicsProtocolArg>,
     #[arg(long, value_enum)]
     pub color_mode: Option<ColorModeArg>,
     #[arg(long, value_enum)]
@@ -126,6 +141,12 @@ pub struct StartArgs {
     pub sync_offset_ms: Option<i32>,
     #[arg(long, value_enum)]
     pub sync_speed_mode: Option<SyncSpeedModeArg>,
+    #[arg(long, value_enum)]
+    pub sync_policy: Option<SyncPolicyArg>,
+    #[arg(long)]
+    pub sync_hard_snap_ms: Option<u32>,
+    #[arg(long)]
+    pub sync_kp: Option<f32>,
     #[arg(long, default_value_t = 60.0)]
     pub fov_deg: f32,
     #[arg(long, default_value_t = 0.1)]
@@ -177,6 +198,12 @@ pub struct RunArgs {
     /// Animation selector by name or index.
     #[arg(long)]
     pub anim: Option<String>,
+    /// Directory to scan for camera .vmd files.
+    #[arg(long, default_value = "assets/camera")]
+    pub camera_dir: PathBuf,
+    /// Camera selector: none | auto | <name> | <path>
+    #[arg(long)]
+    pub camera: Option<String>,
     /// Optional camera VMD track path.
     #[arg(long)]
     pub camera_vmd: Option<PathBuf>,
@@ -190,6 +217,12 @@ pub struct RunArgs {
     pub camera_vmd_fps: Option<f32>,
     #[arg(long, value_enum, default_value_t = ModeArg::Braille)]
     pub mode: ModeArg,
+    #[arg(long, value_enum)]
+    pub output_mode: Option<OutputModeArg>,
+    #[arg(long, value_enum)]
+    pub recover_color: Option<RecoverColorArg>,
+    #[arg(long, value_enum)]
+    pub graphics_protocol: Option<GraphicsProtocolArg>,
     #[arg(long, value_enum)]
     pub color_mode: Option<ColorModeArg>,
     #[arg(long, value_enum)]
@@ -252,6 +285,12 @@ pub struct RunArgs {
     pub sync_offset_ms: Option<i32>,
     #[arg(long, value_enum)]
     pub sync_speed_mode: Option<SyncSpeedModeArg>,
+    #[arg(long, value_enum)]
+    pub sync_policy: Option<SyncPolicyArg>,
+    #[arg(long)]
+    pub sync_hard_snap_ms: Option<u32>,
+    #[arg(long)]
+    pub sync_kp: Option<f32>,
     #[arg(long, default_value_t = 60.0)]
     pub fov_deg: f32,
     #[arg(long, default_value_t = 0.1)]
@@ -298,6 +337,10 @@ pub struct BenchArgs {
     pub seconds: f32,
     #[arg(long, value_enum, default_value_t = ModeArg::Ascii)]
     pub mode: ModeArg,
+    #[arg(long, value_enum)]
+    pub output_mode: Option<OutputModeArg>,
+    #[arg(long, value_enum)]
+    pub graphics_protocol: Option<GraphicsProtocolArg>,
     #[arg(long, value_enum)]
     pub color_mode: Option<ColorModeArg>,
     #[arg(long, value_enum)]
@@ -400,6 +443,22 @@ pub struct PreviewArgs {
 }
 
 #[derive(Debug, clap::Args)]
+pub struct PreprocessArgs {
+    /// Input GLB file.
+    #[arg(long)]
+    pub glb: PathBuf,
+    /// Output GLB file path.
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Texture upscale factor.
+    #[arg(long, default_value_t = 2)]
+    pub upscale_factor: u32,
+    /// Optional unsharp strength (0.0 disables).
+    #[arg(long, default_value_t = 0.20)]
+    pub upscale_sharpen: f32,
+}
+
+#[derive(Debug, clap::Args)]
 pub struct InspectArgs {
     /// Path to .glb or .gltf file.
     #[arg(long)]
@@ -443,6 +502,35 @@ pub enum ContrastProfileArg {
 pub enum SyncSpeedModeArg {
     Auto,
     Realtime,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SyncPolicyArg {
+    Continuous,
+    Fixed,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum OutputModeArg {
+    Text,
+    Hybrid,
+    Graphics,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum RecoverColorArg {
+    Auto,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum GraphicsProtocolArg {
+    Auto,
+    Kitty,
+    #[value(name = "iterm2")]
+    Iterm2,
+    None,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -594,6 +682,43 @@ impl From<SyncSpeedModeArg> for SyncSpeedMode {
         match value {
             SyncSpeedModeArg::Auto => SyncSpeedMode::AutoDurationFit,
             SyncSpeedModeArg::Realtime => SyncSpeedMode::Realtime1x,
+        }
+    }
+}
+
+impl From<SyncPolicyArg> for SyncPolicy {
+    fn from(value: SyncPolicyArg) -> Self {
+        match value {
+            SyncPolicyArg::Continuous => SyncPolicy::Continuous,
+            SyncPolicyArg::Fixed => SyncPolicy::Fixed,
+            SyncPolicyArg::Manual => SyncPolicy::Manual,
+        }
+    }
+}
+
+impl From<OutputModeArg> for RenderOutputMode {
+    fn from(value: OutputModeArg) -> Self {
+        match value {
+            OutputModeArg::Text => RenderOutputMode::Text,
+            OutputModeArg::Hybrid => RenderOutputMode::Hybrid,
+            OutputModeArg::Graphics => RenderOutputMode::Graphics,
+        }
+    }
+}
+
+impl From<RecoverColorArg> for bool {
+    fn from(value: RecoverColorArg) -> Self {
+        matches!(value, RecoverColorArg::Auto)
+    }
+}
+
+impl From<GraphicsProtocolArg> for GraphicsProtocol {
+    fn from(value: GraphicsProtocolArg) -> Self {
+        match value {
+            GraphicsProtocolArg::Auto => GraphicsProtocol::Auto,
+            GraphicsProtocolArg::Kitty => GraphicsProtocol::Kitty,
+            GraphicsProtocolArg::Iterm2 => GraphicsProtocol::Iterm2,
+            GraphicsProtocolArg::None => GraphicsProtocol::None,
         }
     }
 }

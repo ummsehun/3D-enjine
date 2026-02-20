@@ -4,8 +4,8 @@ use std::fmt::Write as _;
 use crate::math::{depth_less, perspective_matrix};
 use crate::scene::{
     AnsiQuantization, BrailleProfile, ClarityProfile, ColorMode, ContrastProfile, DEFAULT_CHARSET,
-    DetailProfile, MeshCpu, MeshLayer, RenderConfig, RenderMode, SceneCpu, TextureSamplingMode,
-    ThemeStyle, UvTransform2D,
+    DetailProfile, MaterialAlphaMode, MeshCpu, MeshLayer, RenderConfig, RenderMode, SceneCpu,
+    TextureSamplingMode, ThemeStyle, UvTransform2D,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -166,6 +166,38 @@ pub struct RenderStats {
     pub subject_visible_height_ratio: f32,
     pub subject_centroid_px: Option<(f32, f32)>,
     pub subject_bbox_px: Option<(u16, u16, u16, u16)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RasterPass {
+    Opaque,
+    Mask,
+    Blend,
+}
+
+impl RasterPass {
+    fn all() -> [Self; 3] {
+        [Self::Opaque, Self::Mask, Self::Blend]
+    }
+
+    fn matches(self, mode: MaterialAlphaMode) -> bool {
+        match (self, mode) {
+            (Self::Opaque, MaterialAlphaMode::Opaque) => true,
+            (Self::Mask, MaterialAlphaMode::Mask) => true,
+            (Self::Blend, MaterialAlphaMode::Blend) => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MaterialSample {
+    albedo_linear: [f32; 3],
+    alpha: f32,
+    emissive_linear: [f32; 3],
+    alpha_mode: MaterialAlphaMode,
+    alpha_cutoff: f32,
+    double_sided: bool,
 }
 
 const BACKGROUND_ASCII: [char; 4] = [' ', ' ', '.', ':'];
@@ -449,17 +481,46 @@ fn hash01(x: usize, y: usize, salt: usize) -> f32 {
     (folded as f32) / (u32::MAX as f32)
 }
 
-fn sample_material_albedo(
+fn resolve_material_props(scene: &SceneCpu, material_index: Option<usize>) -> MaterialSample {
+    if let Some(material) = material_index.and_then(|index| scene.materials.get(index)) {
+        return MaterialSample {
+            albedo_linear: [1.0, 1.0, 1.0],
+            alpha: 1.0,
+            emissive_linear: [
+                material.emissive_factor[0].clamp(0.0, 1.0),
+                material.emissive_factor[1].clamp(0.0, 1.0),
+                material.emissive_factor[2].clamp(0.0, 1.0),
+            ],
+            alpha_mode: material.alpha_mode,
+            alpha_cutoff: material.alpha_cutoff.clamp(0.0, 1.0),
+            double_sided: material.double_sided,
+        };
+    }
+    MaterialSample {
+        albedo_linear: [1.0, 1.0, 1.0],
+        alpha: 1.0,
+        emissive_linear: [0.0, 0.0, 0.0],
+        alpha_mode: MaterialAlphaMode::Opaque,
+        alpha_cutoff: 0.5,
+        double_sided: false,
+    }
+}
+
+fn sample_material(
     scene: &SceneCpu,
     material_index: Option<usize>,
     uv0: Vec2,
     uv1: Vec2,
     vertex_color: [f32; 4],
     config: &RenderConfig,
-) -> [f32; 3] {
+) -> MaterialSample {
     if !config.material_color {
-        return [1.0, 1.0, 1.0];
+        let mut material = resolve_material_props(scene, material_index);
+        material.albedo_linear = [1.0, 1.0, 1.0];
+        material.alpha = 1.0;
+        return material;
     }
+    let mut out = resolve_material_props(scene, material_index);
     let mut color = [
         vertex_color[0],
         vertex_color[1],
@@ -493,11 +554,13 @@ fn sample_material_albedo(
             }
         }
     }
-    [
+    out.albedo_linear = [
         color[0].clamp(0.0, 1.0),
         color[1].clamp(0.0, 1.0),
         color[2].clamp(0.0, 1.0),
-    ]
+    ];
+    out.alpha = color[3].clamp(0.0, 1.0);
+    out
 }
 
 fn apply_uv_transform(uv: Vec2, transform: UvTransform2D) -> Vec2 {
@@ -912,51 +975,53 @@ fn render_frame_ascii(
         stats.root_depth = Some(depth);
     }
     let exposure = scratch.exposure * exposure_bias_multiplier(config.exposure_bias);
-    for (instance_index, instance) in scene.mesh_instances.iter().enumerate() {
-        let Some(mesh) = scene.meshes.get(instance.mesh_index) else {
-            continue;
-        };
-        let node_global = global_matrices
-            .get(instance.node_index)
-            .copied()
-            .unwrap_or(Mat4::IDENTITY);
-        let model = model_rotation * node_global;
-        let normal_matrix = Mat3::from_mat4(model).inverse().transpose();
-        {
-            let projected_vertices = scratch.prepare_projected_vertices(mesh.positions.len());
-            project_mesh_vertices(
+    for pass in RasterPass::all() {
+        for (instance_index, instance) in scene.mesh_instances.iter().enumerate() {
+            let Some(mesh) = scene.meshes.get(instance.mesh_index) else {
+                continue;
+            };
+            let node_global = global_matrices
+                .get(instance.node_index)
+                .copied()
+                .unwrap_or(Mat4::IDENTITY);
+            let model = model_rotation * node_global;
+            let normal_matrix = Mat3::from_mat4(model).inverse().transpose();
+            {
+                let projected_vertices = scratch.prepare_projected_vertices(mesh.positions.len());
+                project_mesh_vertices(
+                    mesh,
+                    model,
+                    normal_matrix,
+                    view_projection,
+                    frame.width,
+                    frame.height,
+                    instance.skin_index.and_then(|i| skin_matrices.get(i)),
+                    instance_morph_weights
+                        .get(instance_index)
+                        .map(Vec::as_slice),
+                    projected_vertices,
+                );
+            }
+            let projected_vertices = scratch.projected_vertices.as_slice();
+            rasterize_mesh(
                 mesh,
-                model,
-                normal_matrix,
-                view_projection,
-                frame.width,
-                frame.height,
-                instance.skin_index.and_then(|i| skin_matrices.get(i)),
-                instance_morph_weights
-                    .get(instance_index)
-                    .map(Vec::as_slice),
                 projected_vertices,
+                frame,
+                charset,
+                config,
+                scene,
+                &mut stats,
+                shading,
+                contrast,
+                palette,
+                exposure,
+                &mut histogram,
+                &mut histogram_count,
+                subject_depth_cells.as_mut_slice(),
+                matches!(instance.layer, MeshLayer::Subject),
+                pass,
             );
         }
-        let projected_vertices = scratch.projected_vertices.as_slice();
-        stats.triangles_total += mesh.indices.len();
-        rasterize_mesh(
-            mesh,
-            projected_vertices,
-            frame,
-            charset,
-            config,
-            scene,
-            &mut stats,
-            shading,
-            contrast,
-            palette,
-            exposure,
-            &mut histogram,
-            &mut histogram_count,
-            subject_depth_cells.as_mut_slice(),
-            matches!(instance.layer, MeshLayer::Subject),
-        );
     }
     update_exposure_from_histogram(
         &mut scratch.exposure,
@@ -1040,53 +1105,55 @@ fn render_frame_braille(
         config.clarity_profile,
         scratch.safe_boost_active,
     );
-    for (instance_index, instance) in scene.mesh_instances.iter().enumerate() {
-        let Some(mesh) = scene.meshes.get(instance.mesh_index) else {
-            continue;
-        };
-        let node_global = global_matrices
-            .get(instance.node_index)
-            .copied()
-            .unwrap_or(Mat4::IDENTITY);
-        let model = model_rotation * node_global;
-        let normal_matrix = Mat3::from_mat4(model).inverse().transpose();
-        {
-            let projected_vertices = scratch.prepare_projected_vertices(mesh.positions.len());
-            project_mesh_vertices(
+    for pass in RasterPass::all() {
+        for (instance_index, instance) in scene.mesh_instances.iter().enumerate() {
+            let Some(mesh) = scene.meshes.get(instance.mesh_index) else {
+                continue;
+            };
+            let node_global = global_matrices
+                .get(instance.node_index)
+                .copied()
+                .unwrap_or(Mat4::IDENTITY);
+            let model = model_rotation * node_global;
+            let normal_matrix = Mat3::from_mat4(model).inverse().transpose();
+            {
+                let projected_vertices = scratch.prepare_projected_vertices(mesh.positions.len());
+                project_mesh_vertices(
+                    mesh,
+                    model,
+                    normal_matrix,
+                    view_projection,
+                    sub_w,
+                    sub_h,
+                    instance.skin_index.and_then(|i| skin_matrices.get(i)),
+                    instance_morph_weights
+                        .get(instance_index)
+                        .map(Vec::as_slice),
+                    projected_vertices,
+                );
+            }
+            let projected_vertices = scratch.projected_vertices.as_slice();
+            let subpixels = &mut scratch.braille_subpixels;
+            rasterize_braille_mesh(
                 mesh,
-                model,
-                normal_matrix,
-                view_projection,
-                sub_w,
-                sub_h,
-                instance.skin_index.and_then(|i| skin_matrices.get(i)),
-                instance_morph_weights
-                    .get(instance_index)
-                    .map(Vec::as_slice),
                 projected_vertices,
+                subpixels,
+                config,
+                scene,
+                &mut stats,
+                shading,
+                contrast,
+                palette,
+                exposure,
+                threshold,
+                &mut histogram,
+                &mut histogram_count,
+                subject_depth_cells.as_mut_slice(),
+                matches!(instance.layer, MeshLayer::Subject),
+                frame.width,
+                pass,
             );
         }
-        let projected_vertices = scratch.projected_vertices.as_slice();
-        let subpixels = &mut scratch.braille_subpixels;
-        stats.triangles_total += mesh.indices.len();
-        rasterize_braille_mesh(
-            mesh,
-            projected_vertices,
-            subpixels,
-            config,
-            scene,
-            &mut stats,
-            shading,
-            contrast,
-            palette,
-            exposure,
-            threshold,
-            &mut histogram,
-            &mut histogram_count,
-            subject_depth_cells.as_mut_slice(),
-            matches!(instance.layer, MeshLayer::Subject),
-            frame.width,
-        );
     }
     update_exposure_from_histogram(
         &mut scratch.exposure,
@@ -1282,20 +1349,54 @@ fn rasterize_mesh(
     histogram_count: &mut u32,
     subject_depth_cells: &mut [f32],
     is_subject_layer: bool,
+    pass: RasterPass,
 ) {
     let width = i32::from(frame.width);
     let height = i32::from(frame.height);
     let width_usize = usize::from(frame.width);
-    let triangle_stride = config.triangle_stride.max(1);
+    let triangle_stride = if matches!(pass, RasterPass::Blend) && is_subject_layer {
+        (config.triangle_stride / 2).max(1)
+    } else {
+        config.triangle_stride.max(1)
+    };
     let min_triangle_area_px2 = config.min_triangle_area_px2.max(0.0);
     if width <= 0 || height <= 0 {
         return;
     }
+    let material_props = resolve_material_props(scene, mesh.material_index);
+    if !pass.matches(material_props.alpha_mode) {
+        return;
+    }
+    stats.triangles_total += mesh.indices.len();
+    let write_depth = !matches!(pass, RasterPass::Blend);
 
-    for (triangle_index, tri) in mesh.indices.iter().enumerate() {
-        if triangle_stride > 1 && (triangle_index % triangle_stride) != 0 {
-            continue;
+    let mut triangle_order = Vec::with_capacity(mesh.indices.len());
+    if matches!(pass, RasterPass::Blend) {
+        let mut depth_sorted = Vec::with_capacity(mesh.indices.len());
+        for (triangle_index, tri) in mesh.indices.iter().enumerate() {
+            if triangle_stride > 1 && (triangle_index % triangle_stride) != 0 {
+                continue;
+            }
+            let (Some(v0), Some(v1), Some(v2)) = (
+                projected_vertices.get(tri[0] as usize).copied().flatten(),
+                projected_vertices.get(tri[1] as usize).copied().flatten(),
+                projected_vertices.get(tri[2] as usize).copied().flatten(),
+            ) else {
+                continue;
+            };
+            let avg_depth = (v0.depth + v1.depth + v2.depth) * (1.0 / 3.0);
+            depth_sorted.push((triangle_index, avg_depth));
         }
+        depth_sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        triangle_order.extend(depth_sorted.into_iter().map(|(idx, _)| idx));
+    } else {
+        triangle_order.extend((0..mesh.indices.len()).filter(|triangle_index| {
+            triangle_stride <= 1 || (triangle_index % triangle_stride) == 0
+        }));
+    }
+
+    for triangle_index in triangle_order {
+        let tri = &mesh.indices[triangle_index];
         let (Some(v0), Some(v1), Some(v2)) = (
             projected_vertices.get(tri[0] as usize).copied().flatten(),
             projected_vertices.get(tri[1] as usize).copied().flatten(),
@@ -1305,6 +1406,10 @@ fn rasterize_mesh(
         };
 
         let signed_area = perp_dot(v1.screen - v0.screen, v2.screen - v0.screen);
+        if !material_props.double_sided && signed_area >= 0.0 {
+            stats.triangles_culled += 1;
+            continue;
+        }
         if signed_area.abs() < 1e-8 || signed_area.abs() < min_triangle_area_px2 {
             stats.triangles_culled += 1;
             continue;
@@ -1376,10 +1481,17 @@ fn rasterize_mesh(
                     continue;
                 }
                 let idx = (y as usize) * width_usize + (x as usize);
-                if depth_less(frame.depth[idx], depth) {
-                    frame.depth[idx] = depth;
+                let depth_pass = if write_depth {
+                    depth_less(frame.depth[idx], depth)
+                } else {
+                    depth <= frame.depth[idx]
+                };
+                if depth_pass {
+                    if write_depth {
+                        frame.depth[idx] = depth;
+                    }
                     if is_subject_layer && idx < subject_depth_cells.len() {
-                        if depth_less(subject_depth_cells[idx], depth) {
+                        if write_depth && depth_less(subject_depth_cells[idx], depth) {
                             subject_depth_cells[idx] = depth;
                         }
                     }
@@ -1399,14 +1511,20 @@ fn rasterize_mesh(
                         .material_index
                         .or(v1.material_index)
                         .or(v2.material_index);
-                    let albedo = sample_material_albedo(
-                        scene,
-                        material_index,
-                        uv0,
-                        uv1,
-                        vertex_color,
-                        config,
-                    );
+                    let sample =
+                        sample_material(scene, material_index, uv0, uv1, vertex_color, config);
+                    if matches!(pass, RasterPass::Mask) && sample.alpha < sample.alpha_cutoff {
+                        edge0 += edge0_a;
+                        edge1 += edge1_a;
+                        edge2 += edge2_a;
+                        continue;
+                    }
+                    if matches!(pass, RasterPass::Blend) && sample.alpha <= 0.01 {
+                        edge0 += edge0_a;
+                        edge1 += edge1_a;
+                        edge2 += edge2_a;
+                        continue;
+                    }
                     let lighting = shade_lighting(world_normal, world_pos, shading).clamp(0.0, 1.0);
                     let view_dir = (shading.camera_pos - world_pos).normalize_or_zero();
                     let edge_factor = (1.0 - world_normal.dot(view_dir).abs()).powf(1.6);
@@ -1416,9 +1534,9 @@ fn rasterize_mesh(
                         * (1.0 - fog.clamp(0.0, 1.0)))
                     .clamp(0.0, 1.0);
                     let mut shaded_rgb = [
-                        albedo[0] * base_light,
-                        albedo[1] * base_light,
-                        albedo[2] * base_light,
+                        sample.albedo_linear[0] * base_light + sample.emissive_linear[0],
+                        sample.albedo_linear[1] * base_light + sample.emissive_linear[1],
+                        sample.albedo_linear[2] * base_light + sample.emissive_linear[2],
                     ];
                     if config.material_color {
                         let sat_gain = clarity_saturation_gain(config.clarity_profile)
@@ -1428,15 +1546,40 @@ fn rasterize_mesh(
                     let base = luminance(shaded_rgb);
                     push_histogram(histogram, histogram_count, base);
                     let floor = contrast.floor.max(config.model_lift.clamp(0.02, 0.45));
-                    let intensity = tone_map_intensity(base, floor, contrast.gamma, exposure);
+                    let mut intensity = tone_map_intensity(base, floor, contrast.gamma, exposure);
+                    if matches!(pass, RasterPass::Blend) {
+                        let alpha = sample.alpha.clamp(0.0, 1.0);
+                        intensity = intensity * alpha
+                            + glyph_intensity(frame.glyphs[idx], charset) * (1.0 - alpha);
+                    }
                     frame.glyphs[idx] = glyph_for_intensity(intensity, charset);
                     if matches!(config.color_mode, ColorMode::Ansi) {
-                        frame.fg_rgb[idx] = if config.material_color {
+                        let mut out_rgb = if config.material_color {
                             let color_scale = color_scale_from_tonemap(base, intensity);
                             to_display_rgb(scale_rgb(shaded_rgb, color_scale))
                         } else {
                             model_color_for_intensity(intensity, palette)
                         };
+                        if matches!(pass, RasterPass::Blend) {
+                            let alpha = sample.alpha.clamp(0.0, 1.0);
+                            let dst = [
+                                srgb_to_linear(frame.fg_rgb[idx][0] as f32 / 255.0),
+                                srgb_to_linear(frame.fg_rgb[idx][1] as f32 / 255.0),
+                                srgb_to_linear(frame.fg_rgb[idx][2] as f32 / 255.0),
+                            ];
+                            let src = [
+                                srgb_to_linear(out_rgb[0] as f32 / 255.0),
+                                srgb_to_linear(out_rgb[1] as f32 / 255.0),
+                                srgb_to_linear(out_rgb[2] as f32 / 255.0),
+                            ];
+                            let mixed = [
+                                src[0] * alpha + dst[0] * (1.0 - alpha),
+                                src[1] * alpha + dst[1] * (1.0 - alpha),
+                                src[2] * alpha + dst[2] * (1.0 - alpha),
+                            ];
+                            out_rgb = to_display_rgb(mixed);
+                        }
+                        frame.fg_rgb[idx] = out_rgb;
                         frame.has_color = true;
                     }
                     stats.pixels_drawn += 1;
@@ -1466,20 +1609,54 @@ fn rasterize_braille_mesh(
     subject_depth_cells: &mut [f32],
     is_subject_layer: bool,
     cell_width: u16,
+    pass: RasterPass,
 ) {
     let width = i32::from(subpixels.width);
     let height = i32::from(subpixels.height);
     let width_usize = usize::from(subpixels.width);
-    let triangle_stride = config.triangle_stride.max(1);
+    let triangle_stride = if matches!(pass, RasterPass::Blend) && is_subject_layer {
+        (config.triangle_stride / 2).max(1)
+    } else {
+        config.triangle_stride.max(1)
+    };
     let min_triangle_area_px2 = config.min_triangle_area_px2.max(0.0);
     if width <= 0 || height <= 0 {
         return;
     }
+    let material_props = resolve_material_props(scene, mesh.material_index);
+    if !pass.matches(material_props.alpha_mode) {
+        return;
+    }
+    stats.triangles_total += mesh.indices.len();
+    let write_depth = !matches!(pass, RasterPass::Blend);
 
-    for (triangle_index, tri) in mesh.indices.iter().enumerate() {
-        if triangle_stride > 1 && (triangle_index % triangle_stride) != 0 {
-            continue;
+    let mut triangle_order = Vec::with_capacity(mesh.indices.len());
+    if matches!(pass, RasterPass::Blend) {
+        let mut depth_sorted = Vec::with_capacity(mesh.indices.len());
+        for (triangle_index, tri) in mesh.indices.iter().enumerate() {
+            if triangle_stride > 1 && (triangle_index % triangle_stride) != 0 {
+                continue;
+            }
+            let (Some(v0), Some(v1), Some(v2)) = (
+                projected_vertices.get(tri[0] as usize).copied().flatten(),
+                projected_vertices.get(tri[1] as usize).copied().flatten(),
+                projected_vertices.get(tri[2] as usize).copied().flatten(),
+            ) else {
+                continue;
+            };
+            let avg_depth = (v0.depth + v1.depth + v2.depth) * (1.0 / 3.0);
+            depth_sorted.push((triangle_index, avg_depth));
         }
+        depth_sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        triangle_order.extend(depth_sorted.into_iter().map(|(idx, _)| idx));
+    } else {
+        triangle_order.extend((0..mesh.indices.len()).filter(|triangle_index| {
+            triangle_stride <= 1 || (triangle_index % triangle_stride) == 0
+        }));
+    }
+
+    for triangle_index in triangle_order {
+        let tri = &mesh.indices[triangle_index];
         let (Some(v0), Some(v1), Some(v2)) = (
             projected_vertices.get(tri[0] as usize).copied().flatten(),
             projected_vertices.get(tri[1] as usize).copied().flatten(),
@@ -1489,6 +1666,10 @@ fn rasterize_braille_mesh(
         };
 
         let signed_area = perp_dot(v1.screen - v0.screen, v2.screen - v0.screen);
+        if !material_props.double_sided && signed_area >= 0.0 {
+            stats.triangles_culled += 1;
+            continue;
+        }
         if signed_area.abs() < 1e-8 || signed_area.abs() < min_triangle_area_px2 {
             stats.triangles_culled += 1;
             continue;
@@ -1555,14 +1736,22 @@ fn rasterize_braille_mesh(
                     continue;
                 }
                 let idx = (y as usize) * width_usize + (x as usize);
-                if depth_less(subpixels.depth[idx], depth) {
-                    subpixels.depth[idx] = depth;
+                let depth_pass = if write_depth {
+                    depth_less(subpixels.depth[idx], depth)
+                } else {
+                    depth <= subpixels.depth[idx]
+                };
+                if depth_pass {
+                    if write_depth {
+                        subpixels.depth[idx] = depth;
+                    }
                     if is_subject_layer {
                         let cell_x = (x as usize) / 2;
                         let cell_y = (y as usize) / 4;
                         let fw = usize::from(cell_width.max(1));
                         let cidx = cell_y.saturating_mul(fw).saturating_add(cell_x);
                         if cidx < subject_depth_cells.len()
+                            && write_depth
                             && depth_less(subject_depth_cells[cidx], depth)
                         {
                             subject_depth_cells[cidx] = depth;
@@ -1584,14 +1773,20 @@ fn rasterize_braille_mesh(
                         .material_index
                         .or(v1.material_index)
                         .or(v2.material_index);
-                    let albedo = sample_material_albedo(
-                        scene,
-                        material_index,
-                        uv0,
-                        uv1,
-                        vertex_color,
-                        config,
-                    );
+                    let sample =
+                        sample_material(scene, material_index, uv0, uv1, vertex_color, config);
+                    if matches!(pass, RasterPass::Mask) && sample.alpha < sample.alpha_cutoff {
+                        edge0 += edge0_a;
+                        edge1 += edge1_a;
+                        edge2 += edge2_a;
+                        continue;
+                    }
+                    if matches!(pass, RasterPass::Blend) && sample.alpha <= 0.01 {
+                        edge0 += edge0_a;
+                        edge1 += edge1_a;
+                        edge2 += edge2_a;
+                        continue;
+                    }
                     let lighting = shade_lighting(world_normal, world_pos, shading).clamp(0.0, 1.0);
                     let view_dir = (shading.camera_pos - world_pos).normalize_or_zero();
                     let edge_factor = (1.0 - world_normal.dot(view_dir).abs()).powf(1.6);
@@ -1601,9 +1796,9 @@ fn rasterize_braille_mesh(
                         * (1.0 - fog.clamp(0.0, 1.0)))
                     .clamp(0.0, 1.0);
                     let mut shaded_rgb = [
-                        albedo[0] * base_light,
-                        albedo[1] * base_light,
-                        albedo[2] * base_light,
+                        sample.albedo_linear[0] * base_light + sample.emissive_linear[0],
+                        sample.albedo_linear[1] * base_light + sample.emissive_linear[1],
+                        sample.albedo_linear[2] * base_light + sample.emissive_linear[2],
                     ];
                     if config.material_color {
                         let sat_gain = clarity_saturation_gain(config.clarity_profile)
@@ -1613,14 +1808,38 @@ fn rasterize_braille_mesh(
                     let base = luminance(shaded_rgb);
                     push_histogram(histogram, histogram_count, base);
                     let floor = threshold.floor.max(config.model_lift.clamp(0.02, 0.45));
-                    let intensity = tone_map_intensity(base, floor, threshold.gamma, exposure);
+                    let mut intensity = tone_map_intensity(base, floor, threshold.gamma, exposure);
+                    if matches!(pass, RasterPass::Blend) {
+                        let alpha = sample.alpha.clamp(0.0, 1.0);
+                        intensity = intensity * alpha + subpixels.intensity[idx] * (1.0 - alpha);
+                    }
                     subpixels.intensity[idx] = intensity;
-                    subpixels.color_rgb[idx] = if config.material_color {
+                    let mut out_rgb = if config.material_color {
                         let color_scale = color_scale_from_tonemap(base, intensity);
                         to_display_rgb(scale_rgb(shaded_rgb, color_scale))
                     } else {
                         model_color_for_intensity(intensity, palette)
                     };
+                    if matches!(pass, RasterPass::Blend) {
+                        let alpha = sample.alpha.clamp(0.0, 1.0);
+                        let dst = [
+                            srgb_to_linear(subpixels.color_rgb[idx][0] as f32 / 255.0),
+                            srgb_to_linear(subpixels.color_rgb[idx][1] as f32 / 255.0),
+                            srgb_to_linear(subpixels.color_rgb[idx][2] as f32 / 255.0),
+                        ];
+                        let src = [
+                            srgb_to_linear(out_rgb[0] as f32 / 255.0),
+                            srgb_to_linear(out_rgb[1] as f32 / 255.0),
+                            srgb_to_linear(out_rgb[2] as f32 / 255.0),
+                        ];
+                        let mixed = [
+                            src[0] * alpha + dst[0] * (1.0 - alpha),
+                            src[1] * alpha + dst[1] * (1.0 - alpha),
+                            src[2] * alpha + dst[2] * (1.0 - alpha),
+                        ];
+                        out_rgb = to_display_rgb(mixed);
+                    }
+                    subpixels.color_rgb[idx] = out_rgb;
                     stats.pixels_drawn += 1;
                 }
                 edge0 += edge0_a;
@@ -1852,6 +2071,17 @@ fn glyph_for_intensity(intensity: f32, charset: &[char]) -> char {
     let last = charset.len().saturating_sub(1);
     let index = ((intensity * (last as f32)).round() as usize).min(last);
     charset[index]
+}
+
+fn glyph_intensity(glyph: char, charset: &[char]) -> f32 {
+    if charset.is_empty() {
+        return 0.0;
+    }
+    if let Some(index) = charset.iter().position(|ch| *ch == glyph) {
+        let denom = charset.len().saturating_sub(1).max(1) as f32;
+        return (index as f32 / denom).clamp(0.0, 1.0);
+    }
+    if glyph == ' ' { 0.0 } else { 1.0 }
 }
 
 fn visible_cell_ratio(frame: &FrameBuffers) -> f32 {

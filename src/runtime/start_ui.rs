@@ -1,15 +1,19 @@
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io::BufReader,
+    io::{self, BufReader, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use anyhow::Result;
 use crossterm::{
+    cursor::MoveTo,
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
+    queue,
+    style::Print,
     terminal::window_size,
+    terminal::{Clear, ClearType},
 };
 use ratatui::{
     prelude::*,
@@ -21,26 +25,28 @@ use crate::{
     loader,
     runtime::{config::UiLanguage, terminal::RatatuiSession},
     scene::{
-        AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraControlMode, CameraFocusMode,
-        CellAspectMode, CenterLockMode, CinematicCameraMode, ClarityProfile, ColorMode,
-        ContrastProfile, DetailProfile, PerfProfile, RenderBackend, RenderConfig, RenderMode,
-        SyncSpeedMode, TextureSamplingMode, ThemeStyle, estimate_cell_aspect_from_window,
-        resolve_cell_aspect,
+        AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
+        CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
+        ClarityProfile, ColorMode, ContrastProfile, DetailProfile, GraphicsProtocol, PerfProfile,
+        RenderBackend, RenderConfig, RenderMode, RenderOutputMode, SyncPolicy, SyncSpeedMode,
+        TextureSamplingMode, ThemeStyle, estimate_cell_aspect_from_window, resolve_cell_aspect,
     },
 };
 
 const MIN_WIDTH: u16 = 60;
 const MIN_HEIGHT: u16 = 18;
 const START_FPS_OPTIONS: [u32; 9] = [0, 15, 20, 24, 30, 40, 60, 90, 120];
-const RENDER_FIELD_COUNT: usize = 28;
+const RENDER_FIELD_COUNT: usize = 33;
 const SYNC_OFFSET_STEP_MS: i32 = 10;
 const SYNC_OFFSET_LIMIT_MS: i32 = 5_000;
+const RATATUI_SAFE_MAX_CELLS: u32 = (u16::MAX as u32) - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartWizardStep {
     Model,
     Music,
     Stage,
+    Camera,
     Render,
     AspectCalib,
     Confirm,
@@ -52,9 +58,10 @@ impl StartWizardStep {
             StartWizardStep::Model => 0,
             StartWizardStep::Music => 1,
             StartWizardStep::Stage => 2,
-            StartWizardStep::Render => 3,
-            StartWizardStep::AspectCalib => 4,
-            StartWizardStep::Confirm => 5,
+            StartWizardStep::Camera => 3,
+            StartWizardStep::Render => 4,
+            StartWizardStep::AspectCalib => 5,
+            StartWizardStep::Confirm => 6,
         }
     }
 }
@@ -106,9 +113,11 @@ pub enum StartWizardEvent {
     Tick,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct StartWizardDefaults {
     pub mode: RenderMode,
+    pub output_mode: RenderOutputMode,
+    pub graphics_protocol: GraphicsProtocol,
     pub perf_profile: PerfProfile,
     pub detail_profile: DetailProfile,
     pub clarity_profile: ClarityProfile,
@@ -139,13 +148,22 @@ pub struct StartWizardDefaults {
     pub contrast_profile: ContrastProfile,
     pub sync_offset_ms: i32,
     pub sync_speed_mode: SyncSpeedMode,
+    pub sync_policy: SyncPolicy,
+    pub sync_hard_snap_ms: u32,
+    pub sync_kp: f32,
     pub font_preset_enabled: bool,
+    pub camera_mode: CameraMode,
+    pub camera_align_preset: CameraAlignPreset,
+    pub camera_unit_scale: f32,
+    pub camera_vmd_path: Option<PathBuf>,
 }
 
 impl Default for StartWizardDefaults {
     fn default() -> Self {
         Self {
             mode: RenderMode::Braille,
+            output_mode: RenderOutputMode::Text,
+            graphics_protocol: GraphicsProtocol::Auto,
             perf_profile: PerfProfile::Balanced,
             detail_profile: DetailProfile::Balanced,
             clarity_profile: ClarityProfile::Sharp,
@@ -176,7 +194,14 @@ impl Default for StartWizardDefaults {
             contrast_profile: ContrastProfile::Adaptive,
             sync_offset_ms: 0,
             sync_speed_mode: SyncSpeedMode::AutoDurationFit,
+            sync_policy: SyncPolicy::Continuous,
+            sync_hard_snap_ms: 120,
+            sync_kp: 0.15,
             font_preset_enabled: false,
+            camera_mode: CameraMode::Off,
+            camera_align_preset: CameraAlignPreset::Std,
+            camera_unit_scale: 0.08,
+            camera_vmd_path: None,
         }
     }
 }
@@ -186,6 +211,8 @@ pub struct StartSelection {
     pub glb_path: PathBuf,
     pub music_path: Option<PathBuf>,
     pub mode: RenderMode,
+    pub output_mode: RenderOutputMode,
+    pub graphics_protocol: GraphicsProtocol,
     pub perf_profile: PerfProfile,
     pub detail_profile: DetailProfile,
     pub clarity_profile: ClarityProfile,
@@ -216,9 +243,16 @@ pub struct StartSelection {
     pub contrast_profile: ContrastProfile,
     pub sync_offset_ms: i32,
     pub sync_speed_mode: SyncSpeedMode,
+    pub sync_policy: SyncPolicy,
+    pub sync_hard_snap_ms: u32,
+    pub sync_kp: f32,
     pub stage_choice: Option<StageChoice>,
     pub stage_transform: StageTransform,
     pub apply_font_preset: bool,
+    pub camera_vmd_path: Option<PathBuf>,
+    pub camera_mode: CameraMode,
+    pub camera_align_preset: CameraAlignPreset,
+    pub camera_unit_scale: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -254,10 +288,14 @@ struct StartWizardState {
     model_entries: Vec<StartEntry>,
     music_entries: Vec<StartEntry>,
     stage_entries: Vec<StageChoice>,
+    camera_entries: Vec<StartEntry>,
     model_index: usize,
     music_index: usize,
     stage_index: usize,
+    camera_index: usize,
     mode: RenderMode,
+    output_mode: RenderOutputMode,
+    graphics_protocol: GraphicsProtocol,
     perf_profile: PerfProfile,
     detail_profile: DetailProfile,
     clarity_profile: ClarityProfile,
@@ -288,7 +326,14 @@ struct StartWizardState {
     contrast_profile: ContrastProfile,
     sync_offset_ms: i32,
     sync_speed_mode: SyncSpeedMode,
+    sync_policy: SyncPolicy,
+    sync_hard_snap_ms: u32,
+    sync_kp: f32,
     font_preset_enabled: bool,
+    camera_mode: CameraMode,
+    camera_align_preset: CameraAlignPreset,
+    camera_unit_scale: f32,
+    camera_focus_index: usize,
     render_focus_index: usize,
     width: u16,
     height: u16,
@@ -302,19 +347,34 @@ impl StartWizardState {
         model_entries: Vec<StartEntry>,
         music_entries: Vec<StartEntry>,
         stage_entries: Vec<StageChoice>,
+        camera_entries: Vec<StartEntry>,
         defaults: StartWizardDefaults,
         width: u16,
         height: u16,
     ) -> Self {
+        let camera_index = defaults
+            .camera_vmd_path
+            .as_ref()
+            .and_then(|selected| {
+                camera_entries
+                    .iter()
+                    .position(|entry| entry.path == *selected)
+                    .map(|idx| idx + 1)
+            })
+            .unwrap_or(0);
         Self {
             step: StartWizardStep::Model,
             model_entries,
             music_entries,
             stage_entries,
+            camera_entries,
             model_index: 0,
             music_index: 0,
             stage_index: 0,
+            camera_index,
             mode: defaults.mode,
+            output_mode: defaults.output_mode,
+            graphics_protocol: defaults.graphics_protocol,
             perf_profile: defaults.perf_profile,
             detail_profile: defaults.detail_profile,
             clarity_profile: defaults.clarity_profile,
@@ -347,7 +407,14 @@ impl StartWizardState {
                 .sync_offset_ms
                 .clamp(-SYNC_OFFSET_LIMIT_MS, SYNC_OFFSET_LIMIT_MS),
             sync_speed_mode: defaults.sync_speed_mode,
+            sync_policy: defaults.sync_policy,
+            sync_hard_snap_ms: defaults.sync_hard_snap_ms.clamp(10, 2_000),
+            sync_kp: defaults.sync_kp.clamp(0.01, 1.0),
             font_preset_enabled: defaults.font_preset_enabled,
+            camera_mode: defaults.camera_mode,
+            camera_align_preset: defaults.camera_align_preset,
+            camera_unit_scale: defaults.camera_unit_scale.clamp(0.01, 2.0),
+            camera_focus_index: 0,
             render_focus_index: 0,
             width,
             height,
@@ -424,6 +491,7 @@ impl StartWizardState {
             StartWizardStep::Model => self.apply_model_key(key),
             StartWizardStep::Music => self.apply_music_key(key),
             StartWizardStep::Stage => self.apply_stage_key(key),
+            StartWizardStep::Camera => self.apply_camera_key(key),
             StartWizardStep::Render => self.apply_render_key(key),
             StartWizardStep::AspectCalib => self.apply_aspect_key(key),
             StartWizardStep::Confirm => self.apply_confirm_key(key),
@@ -484,6 +552,37 @@ impl StartWizardState {
                 StartWizardAction::Continue
             }
             KeyCode::Enter => {
+                self.step = StartWizardStep::Camera;
+                StartWizardAction::Continue
+            }
+            KeyCode::Esc => {
+                self.step = StartWizardStep::Music;
+                StartWizardAction::Continue
+            }
+            _ => StartWizardAction::Continue,
+        }
+    }
+
+    fn apply_camera_key(&mut self, key: KeyEvent) -> StartWizardAction {
+        let camera_len = self.camera_entries.len() + 1;
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                cycle_index(&mut self.camera_focus_index, 4, -1);
+                StartWizardAction::Continue
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                cycle_index(&mut self.camera_focus_index, 4, 1);
+                StartWizardAction::Continue
+            }
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('H') => {
+                self.adjust_camera_value(camera_len, -1);
+                StartWizardAction::Continue
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('L') => {
+                self.adjust_camera_value(camera_len, 1);
+                StartWizardAction::Continue
+            }
+            KeyCode::Enter => {
                 self.step = StartWizardStep::Render;
                 StartWizardAction::Continue
             }
@@ -518,7 +617,7 @@ impl StartWizardState {
                 StartWizardAction::Continue
             }
             KeyCode::Esc => {
-                self.step = StartWizardStep::Music;
+                self.step = StartWizardStep::Camera;
                 StartWizardAction::Continue
             }
             _ => StartWizardAction::Continue,
@@ -566,7 +665,8 @@ impl StartWizardState {
         match self.step {
             StartWizardStep::Model => self.step = StartWizardStep::Music,
             StartWizardStep::Music => self.step = StartWizardStep::Stage,
-            StartWizardStep::Stage => self.step = StartWizardStep::Render,
+            StartWizardStep::Stage => self.step = StartWizardStep::Camera,
+            StartWizardStep::Camera => self.step = StartWizardStep::Render,
             StartWizardStep::Render => {
                 if self.render_focus_index + 1 < RENDER_FIELD_COUNT {
                     self.render_focus_index += 1;
@@ -584,15 +684,41 @@ impl StartWizardState {
             StartWizardStep::Model => {}
             StartWizardStep::Music => self.step = StartWizardStep::Model,
             StartWizardStep::Stage => self.step = StartWizardStep::Music,
+            StartWizardStep::Camera => self.step = StartWizardStep::Stage,
             StartWizardStep::Render => {
                 if self.render_focus_index > 0 {
                     self.render_focus_index -= 1;
                 } else {
-                    self.step = StartWizardStep::Stage;
+                    self.step = StartWizardStep::Camera;
                 }
             }
             StartWizardStep::AspectCalib => self.step = StartWizardStep::Render,
             StartWizardStep::Confirm => self.step = StartWizardStep::AspectCalib,
+        }
+    }
+
+    fn adjust_camera_value(&mut self, camera_len: usize, delta: i32) {
+        match self.camera_focus_index {
+            0 => cycle_index(&mut self.camera_index, camera_len, delta),
+            1 => {
+                self.camera_mode = match self.camera_mode {
+                    CameraMode::Off => CameraMode::Vmd,
+                    CameraMode::Vmd => CameraMode::Blend,
+                    CameraMode::Blend => CameraMode::Off,
+                };
+            }
+            2 => {
+                self.camera_align_preset = match self.camera_align_preset {
+                    CameraAlignPreset::Std => CameraAlignPreset::AltA,
+                    CameraAlignPreset::AltA => CameraAlignPreset::AltB,
+                    CameraAlignPreset::AltB => CameraAlignPreset::Std,
+                };
+            }
+            3 => {
+                self.camera_unit_scale =
+                    (self.camera_unit_scale + 0.01 * delta as f32).clamp(0.01, 2.0);
+            }
+            _ => {}
         }
     }
 
@@ -751,12 +877,41 @@ impl StartWizardState {
                 }
             }
             26 => {
+                self.output_mode = match self.output_mode {
+                    RenderOutputMode::Text => RenderOutputMode::Hybrid,
+                    RenderOutputMode::Hybrid => RenderOutputMode::Graphics,
+                    RenderOutputMode::Graphics => RenderOutputMode::Text,
+                };
+            }
+            27 => {
+                self.graphics_protocol = match self.graphics_protocol {
+                    GraphicsProtocol::Auto => GraphicsProtocol::Kitty,
+                    GraphicsProtocol::Kitty => GraphicsProtocol::Iterm2,
+                    GraphicsProtocol::Iterm2 => GraphicsProtocol::None,
+                    GraphicsProtocol::None => GraphicsProtocol::Auto,
+                };
+            }
+            28 => {
+                self.sync_policy = match self.sync_policy {
+                    SyncPolicy::Continuous => SyncPolicy::Fixed,
+                    SyncPolicy::Fixed => SyncPolicy::Manual,
+                    SyncPolicy::Manual => SyncPolicy::Continuous,
+                };
+            }
+            29 => {
+                let next = (self.sync_hard_snap_ms as i32 + delta * 10).clamp(10, 2_000);
+                self.sync_hard_snap_ms = next as u32;
+            }
+            30 => {
+                self.sync_kp = (self.sync_kp + 0.01 * delta as f32).clamp(0.01, 1.0);
+            }
+            31 => {
                 self.cell_aspect_mode = match self.cell_aspect_mode {
                     CellAspectMode::Auto => CellAspectMode::Manual,
                     CellAspectMode::Manual => CellAspectMode::Auto,
                 }
             }
-            27 => {
+            32 => {
                 self.font_preset_enabled = !self.font_preset_enabled;
             }
             _ => {}
@@ -774,6 +929,8 @@ impl StartWizardState {
             glb_path,
             music_path: self.selected_music_path().cloned(),
             mode: self.mode,
+            output_mode: self.output_mode,
+            graphics_protocol: self.graphics_protocol,
             perf_profile: self.perf_profile,
             detail_profile: self.detail_profile,
             clarity_profile: self.clarity_profile,
@@ -808,9 +965,20 @@ impl StartWizardState {
             contrast_profile: self.contrast_profile,
             sync_offset_ms: self.sync_offset_ms,
             sync_speed_mode: self.sync_speed_mode,
+            sync_policy: self.sync_policy,
+            sync_hard_snap_ms: self.sync_hard_snap_ms,
+            sync_kp: self.sync_kp,
             stage_choice,
             stage_transform,
             apply_font_preset: self.font_preset_enabled,
+            camera_vmd_path: self.selected_camera_path().cloned(),
+            camera_mode: if self.camera_index == 0 {
+                CameraMode::Off
+            } else {
+                self.camera_mode
+            },
+            camera_align_preset: self.camera_align_preset,
+            camera_unit_scale: self.camera_unit_scale,
         }
     }
 
@@ -831,6 +999,16 @@ impl StartWizardState {
             self.stage_entries
                 .get(self.stage_index.saturating_sub(1))
                 .cloned()
+        }
+    }
+
+    fn selected_camera_path(&self) -> Option<&PathBuf> {
+        if self.camera_index == 0 {
+            None
+        } else {
+            self.camera_entries
+                .get(self.camera_index.saturating_sub(1))
+                .map(|entry| &entry.path)
         }
     }
 
@@ -857,6 +1035,8 @@ impl StartWizardState {
     fn preview_render_config(&self) -> RenderConfig {
         RenderConfig {
             mode: self.mode,
+            output_mode: self.output_mode,
+            graphics_protocol: self.graphics_protocol,
             perf_profile: self.perf_profile,
             detail_profile: self.detail_profile,
             clarity_profile: self.clarity_profile,
@@ -887,6 +1067,9 @@ impl StartWizardState {
             cell_aspect_mode: self.cell_aspect_mode,
             cell_aspect_trim: self.cell_aspect_trim,
             contrast_profile: self.contrast_profile,
+            sync_policy: self.sync_policy,
+            sync_hard_snap_ms: self.sync_hard_snap_ms,
+            sync_kp: self.sync_kp,
             ..RenderConfig::default()
         }
     }
@@ -915,8 +1098,10 @@ pub fn run_start_wizard(
     model_dir: &Path,
     music_dir: &Path,
     stage_dir: &Path,
+    camera_dir: &Path,
     model_files: &[PathBuf],
     music_files: &[PathBuf],
+    camera_files: &[PathBuf],
     stage_entries: &[StageChoice],
     defaults: StartWizardDefaults,
     ui_language: UiLanguage,
@@ -934,6 +1119,10 @@ pub fn run_start_wizard(
         .iter()
         .map(|path| StartEntry::from_path(path))
         .collect::<Vec<_>>();
+    let camera_entries = camera_files
+        .iter()
+        .map(|path| StartEntry::from_path(path))
+        .collect::<Vec<_>>();
     let stage_entries = stage_entries.to_vec();
 
     let mut terminal = RatatuiSession::enter()?;
@@ -942,6 +1131,7 @@ pub fn run_start_wizard(
         model_entries,
         music_entries,
         stage_entries,
+        camera_entries,
         defaults,
         width,
         height,
@@ -949,9 +1139,23 @@ pub fn run_start_wizard(
 
     loop {
         state.refresh_runtime_metrics(anim_selector);
-        terminal.draw(|frame| {
-            draw_start_wizard(frame, model_dir, music_dir, stage_dir, &state, ui_language);
-        })?;
+        let (current_width, current_height) = terminal.size()?;
+        state.on_resize(current_width, current_height);
+        if safe_tui_size(current_width, current_height) {
+            terminal.draw(|frame| {
+                draw_start_wizard(
+                    frame,
+                    model_dir,
+                    music_dir,
+                    stage_dir,
+                    camera_dir,
+                    &state,
+                    ui_language,
+                );
+            })?;
+        } else {
+            draw_unsafe_size_fallback(current_width, current_height, ui_language)?;
+        }
 
         let next_event = if event::poll(Duration::from_millis(120))? {
             Some(event::read()?)
@@ -976,20 +1180,61 @@ pub fn run_start_wizard(
     }
 }
 
+fn safe_tui_size(width: u16, height: u16) -> bool {
+    if width == 0 || height == 0 {
+        return false;
+    }
+    let cells = (width as u32).saturating_mul(height as u32);
+    cells < RATATUI_SAFE_MAX_CELLS
+}
+
+fn draw_unsafe_size_fallback(width: u16, height: u16, lang: UiLanguage) -> Result<()> {
+    let mut stdout = io::stdout();
+    let lines = vec![
+        tr(
+            lang,
+            "터미널 크기 안정화 중입니다. 자동 복구를 기다려주세요.",
+            "Terminal size is unstable. Waiting for auto recovery.",
+        )
+        .to_owned(),
+        format!(
+            "{}: {}x{}",
+            tr(lang, "현재 크기", "Current size"),
+            width,
+            height
+        ),
+        format!(
+            "{}: {}",
+            tr(lang, "안전 셀 한계", "Safe cell limit"),
+            RATATUI_SAFE_MAX_CELLS
+        ),
+        tr(lang, "q: 취소", "q: cancel").to_owned(),
+    ];
+    queue!(stdout, MoveTo(0, 0), Clear(ClearType::All))?;
+    for (idx, line) in lines.iter().enumerate() {
+        if idx > 0 {
+            queue!(stdout, Print("\n"))?;
+        }
+        queue!(stdout, Print(line))?;
+    }
+    stdout.flush()?;
+    Ok(())
+}
+
 fn draw_start_wizard(
     frame: &mut Frame,
     model_dir: &Path,
     music_dir: &Path,
     stage_dir: &Path,
+    camera_dir: &Path,
     state: &StartWizardState,
     ui_language: UiLanguage,
 ) {
+    let area = clamp_ratatui_area(frame.area());
     if state.is_too_small() {
-        draw_min_size_screen(frame, state, ui_language);
+        draw_min_size_screen(frame, state, ui_language, area);
         return;
     }
-
-    let area = frame.area();
     let breakpoint = state.breakpoint();
     let footer_height = match breakpoint {
         UiBreakpoint::Wide => 5,
@@ -1020,6 +1265,7 @@ fn draw_start_wizard(
                 model_dir,
                 music_dir,
                 stage_dir,
+                camera_dir,
                 state,
                 ui_language,
             );
@@ -1036,6 +1282,7 @@ fn draw_start_wizard(
                 model_dir,
                 music_dir,
                 stage_dir,
+                camera_dir,
                 state,
                 ui_language,
             );
@@ -1058,6 +1305,7 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &StartWizardState, ui_langu
         StartWizardStep::Model => tr(ui_language, "모델 선택", "Model"),
         StartWizardStep::Music => tr(ui_language, "음악 선택", "Music"),
         StartWizardStep::Stage => tr(ui_language, "스테이지 선택", "Stage"),
+        StartWizardStep::Camera => tr(ui_language, "카메라 선택", "Camera"),
         StartWizardStep::Render => tr(ui_language, "렌더 옵션", "Render"),
         StartWizardStep::AspectCalib => tr(ui_language, "비율 보정", "Aspect Calib"),
         StartWizardStep::Confirm => tr(ui_language, "확인/실행", "Confirm"),
@@ -1065,7 +1313,7 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &StartWizardState, ui_langu
     let line = Line::from(vec![
         Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("  •  "),
-        Span::raw(format!("{} {}/6", step_name, state.step.index() + 1)),
+        Span::raw(format!("{} {}/7", step_name, state.step.index() + 1)),
     ]);
 
     let para = Paragraph::new(line).block(Block::default().borders(Borders::ALL));
@@ -1082,6 +1330,7 @@ fn draw_step_panel(
         StartWizardStep::Model => draw_model_list(frame, area, state, ui_language),
         StartWizardStep::Music => draw_music_list(frame, area, state, ui_language),
         StartWizardStep::Stage => draw_stage_list(frame, area, state, ui_language),
+        StartWizardStep::Camera => draw_camera_panel(frame, area, state, ui_language),
         StartWizardStep::Render => draw_render_options(frame, area, state, ui_language),
         StartWizardStep::AspectCalib => draw_aspect_calibration(frame, area, state, ui_language),
         StartWizardStep::Confirm => draw_confirm_panel(frame, area, state, ui_language),
@@ -1175,6 +1424,64 @@ fn draw_stage_list(
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
+fn draw_camera_panel(
+    frame: &mut Frame,
+    area: Rect,
+    state: &StartWizardState,
+    ui_language: UiLanguage,
+) {
+    let title = tr(ui_language, "4) 카메라 선택", "4) Select Camera");
+    let camera_source = if state.camera_index == 0 {
+        tr(ui_language, "없음", "None").to_owned()
+    } else {
+        state
+            .camera_entries
+            .get(state.camera_index.saturating_sub(1))
+            .map(|entry| entry.name.clone())
+            .unwrap_or_else(|| tr(ui_language, "없음", "None").to_owned())
+    };
+    let camera_mode = match state.camera_mode {
+        CameraMode::Off => "off",
+        CameraMode::Vmd => "vmd",
+        CameraMode::Blend => "blend",
+    };
+    let align = match state.camera_align_preset {
+        CameraAlignPreset::Std => "std",
+        CameraAlignPreset::AltA => "alt-a",
+        CameraAlignPreset::AltB => "alt-b",
+    };
+    let rows = vec![
+        format!("{}: {}", tr(ui_language, "소스", "Source"), camera_source),
+        format!(
+            "{}: {}",
+            tr(ui_language, "모드", "Mode"),
+            if state.camera_index == 0 {
+                "off"
+            } else {
+                camera_mode
+            }
+        ),
+        format!("{}: {}", tr(ui_language, "프리셋", "Preset"), align),
+        format!(
+            "{}: {:.2}",
+            tr(ui_language, "유닛 스케일", "Unit Scale"),
+            state.camera_unit_scale
+        ),
+    ];
+    let items = rows.into_iter().map(ListItem::new).collect::<Vec<_>>();
+    let mut list_state = ListState::default();
+    list_state.select(Some(state.camera_focus_index.min(3)));
+    let list = List::new(items)
+        .block(Block::default().title(title).borders(Borders::ALL))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
+
 fn draw_render_options(
     frame: &mut Frame,
     area: Rect,
@@ -1249,6 +1556,22 @@ fn draw_render_options(
     let sync_mode = match state.sync_speed_mode {
         SyncSpeedMode::AutoDurationFit => tr(ui_language, "자동", "Auto"),
         SyncSpeedMode::Realtime1x => tr(ui_language, "실시간", "Realtime"),
+    };
+    let output_mode = match state.output_mode {
+        RenderOutputMode::Text => tr(ui_language, "텍스트", "Text"),
+        RenderOutputMode::Hybrid => tr(ui_language, "하이브리드", "Hybrid"),
+        RenderOutputMode::Graphics => tr(ui_language, "그래픽", "Graphics"),
+    };
+    let graphics_protocol = match state.graphics_protocol {
+        GraphicsProtocol::Auto => "auto",
+        GraphicsProtocol::Kitty => "kitty",
+        GraphicsProtocol::Iterm2 => "iterm2",
+        GraphicsProtocol::None => "none",
+    };
+    let sync_policy = match state.sync_policy {
+        SyncPolicy::Continuous => tr(ui_language, "연속", "Continuous"),
+        SyncPolicy::Fixed => tr(ui_language, "고정", "Fixed"),
+        SyncPolicy::Manual => tr(ui_language, "수동", "Manual"),
     };
     let aspect_mode = match state.cell_aspect_mode {
         CellAspectMode::Auto => tr(ui_language, "자동", "Auto"),
@@ -1406,6 +1729,31 @@ fn draw_render_options(
             "{}: {}",
             tr(ui_language, "동기화 속도", "Sync Speed"),
             sync_mode
+        ),
+        format!(
+            "{}: {}",
+            tr(ui_language, "출력 모드", "Output Mode"),
+            output_mode
+        ),
+        format!(
+            "{}: {}",
+            tr(ui_language, "그래픽 프로토콜", "Graphics Protocol"),
+            graphics_protocol
+        ),
+        format!(
+            "{}: {}",
+            tr(ui_language, "동기화 정책", "Sync Policy"),
+            sync_policy
+        ),
+        format!(
+            "{}: {} ms",
+            tr(ui_language, "하드 스냅", "Hard Snap"),
+            state.sync_hard_snap_ms
+        ),
+        format!(
+            "{}: {:.2}",
+            tr(ui_language, "동기화 Kp", "Sync Kp"),
+            state.sync_kp
         ),
         format!(
             "{}: {}",
@@ -1580,6 +1928,22 @@ fn draw_confirm_panel(
         AnsiQuantization::Q216 => "ANSI q216",
         AnsiQuantization::Off => "ANSI truecolor",
     };
+    let output_mode = match selection.output_mode {
+        RenderOutputMode::Text => "Text",
+        RenderOutputMode::Hybrid => "Hybrid",
+        RenderOutputMode::Graphics => "Graphics",
+    };
+    let graphics_protocol = match selection.graphics_protocol {
+        GraphicsProtocol::Auto => "auto",
+        GraphicsProtocol::Kitty => "kitty",
+        GraphicsProtocol::Iterm2 => "iterm2",
+        GraphicsProtocol::None => "none",
+    };
+    let sync_policy = match selection.sync_policy {
+        SyncPolicy::Continuous => "continuous",
+        SyncPolicy::Fixed => "fixed",
+        SyncPolicy::Manual => "manual",
+    };
     let stage_name = selection
         .stage_choice
         .as_ref()
@@ -1594,6 +1958,23 @@ fn draw_confirm_panel(
             StageStatus::Invalid => tr(ui_language, "사용 불가", "Invalid"),
         })
         .unwrap_or_else(|| tr(ui_language, "선택 안함", "Not selected"));
+    let camera_name = selection
+        .camera_vmd_path
+        .as_deref()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| tr(ui_language, "없음", "None").to_owned());
+    let camera_mode = match selection.camera_mode {
+        CameraMode::Off => "off",
+        CameraMode::Vmd => "vmd",
+        CameraMode::Blend => "blend",
+    };
+    let camera_align = match selection.camera_align_preset {
+        CameraAlignPreset::Std => "std",
+        CameraAlignPreset::AltA => "alt-a",
+        CameraAlignPreset::AltB => "alt-b",
+    };
 
     let lines = vec![
         Line::raw(format!(
@@ -1611,6 +1992,14 @@ fn draw_confirm_panel(
             tr(ui_language, "스테이지", "Stage"),
             stage_name,
             stage_status
+        )),
+        Line::raw(format!(
+            "{}: {} / {} / {} / {:.2}",
+            tr(ui_language, "카메라", "Camera"),
+            camera_name,
+            camera_mode,
+            camera_align,
+            selection.camera_unit_scale
         )),
         Line::raw(format!(
             "{}: {:?}",
@@ -1666,6 +2055,12 @@ fn draw_confirm_panel(
         )),
         Line::raw(format!(
             "{}: {} / {}",
+            tr(ui_language, "출력/프로토콜", "Output/Protocol"),
+            output_mode,
+            graphics_protocol
+        )),
+        Line::raw(format!(
+            "{}: {} / {}",
             tr(ui_language, "분위기/반응", "Mood/Reactive"),
             theme_style,
             audio_reactive
@@ -1716,6 +2111,13 @@ fn draw_confirm_panel(
             tr(ui_language, "동기화 오프셋", "Sync Offset"),
             selection.sync_offset_ms
         )),
+        Line::raw(format!(
+            "{}: {} / {}ms / kp {:.2}",
+            tr(ui_language, "동기화 정책", "Sync Policy"),
+            sync_policy,
+            selection.sync_hard_snap_ms,
+            selection.sync_kp
+        )),
         Line::raw(""),
         Line::styled(
             tr(
@@ -1743,6 +2145,7 @@ fn draw_summary_panel(
     model_dir: &Path,
     music_dir: &Path,
     stage_dir: &Path,
+    camera_dir: &Path,
     state: &StartWizardState,
     ui_language: UiLanguage,
 ) {
@@ -1773,6 +2176,13 @@ fn draw_summary_panel(
             StageStatus::Invalid => tr(ui_language, "사용 불가", "Invalid"),
         })
         .unwrap_or_else(|| tr(ui_language, "선택 안함", "Not selected"));
+    let camera_name = selection
+        .camera_vmd_path
+        .as_deref()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| tr(ui_language, "없음", "None").to_owned());
 
     let lines = vec![
         Line::raw(format!(
@@ -1792,6 +2202,11 @@ fn draw_summary_panel(
         )),
         Line::raw(format!(
             "{}: {}",
+            tr(ui_language, "카메라 경로", "Camera Dir"),
+            camera_dir.display()
+        )),
+        Line::raw(format!(
+            "{}: {}",
             tr(ui_language, "모델", "Model"),
             model_name
         )),
@@ -1807,6 +2222,14 @@ fn draw_summary_panel(
             stage_status
         )),
         Line::raw(format!(
+            "{}: {} / {:?} / {:?} / {:.2}",
+            tr(ui_language, "카메라", "Camera"),
+            camera_name,
+            selection.camera_mode,
+            selection.camera_align_preset,
+            selection.camera_unit_scale
+        )),
+        Line::raw(format!(
             "{}: {:.3}",
             tr(ui_language, "적용 비율", "Applied Aspect"),
             state.effective_cell_aspect()
@@ -1816,6 +2239,12 @@ fn draw_summary_panel(
             tr(ui_language, "모드", "Mode"),
             selection.mode,
             selection.color_mode
+        )),
+        Line::raw(format!(
+            "{}: {:?} / {:?}",
+            tr(ui_language, "출력/프로토콜", "Output/Protocol"),
+            selection.output_mode,
+            selection.graphics_protocol
         )),
         Line::raw(format!(
             "{}: {:?} / {:?} / {:?} / {:?}",
@@ -1889,6 +2318,13 @@ fn draw_summary_panel(
             tr(ui_language, "Speed", "Speed"),
             state.expected_sync_speed()
         )),
+        Line::raw(format!(
+            "{}: {:?} / {}ms / kp {:.2}",
+            tr(ui_language, "정책", "Policy"),
+            selection.sync_policy,
+            selection.sync_hard_snap_ms,
+            selection.sync_kp
+        )),
     ];
 
     let para = Paragraph::new(lines)
@@ -1925,6 +2361,11 @@ fn draw_help_panel(
             "스테이지: ↑/↓ 선택, Enter 다음, Esc 이전",
             "Stage: ↑/↓ select, Enter next, Esc back",
         ),
+        StartWizardStep::Camera => tr(
+            ui_language,
+            "카메라: ↑/↓ 항목, ←/→ 값 변경, Enter 다음, Esc 이전",
+            "Camera: ↑/↓ focus, ←/→ change, Enter next, Esc back",
+        ),
         StartWizardStep::Render => tr(
             ui_language,
             "옵션: ↑/↓ 항목, ←/→ 값 변경, Enter 다음, Esc 이전",
@@ -1960,8 +2401,12 @@ fn draw_help_panel(
     frame.render_widget(help, area);
 }
 
-fn draw_min_size_screen(frame: &mut Frame, state: &StartWizardState, ui_language: UiLanguage) {
-    let area = frame.area();
+fn draw_min_size_screen(
+    frame: &mut Frame,
+    state: &StartWizardState,
+    ui_language: UiLanguage,
+    area: Rect,
+) {
     let title = tr(
         ui_language,
         "터미널 크기가 너무 작습니다",
@@ -1992,6 +2437,26 @@ fn draw_min_size_screen(frame: &mut Frame, state: &StartWizardState, ui_language
         .block(Block::default().title(title).borders(Borders::ALL))
         .wrap(Wrap { trim: false });
     frame.render_widget(para, area);
+}
+
+fn clamp_ratatui_area(area: Rect) -> Rect {
+    let cells = (area.width as u32).saturating_mul(area.height as u32);
+    if cells <= RATATUI_SAFE_MAX_CELLS {
+        return area;
+    }
+    let aspect = if area.height == 0 {
+        1.0
+    } else {
+        (area.width as f32 / area.height as f32).max(0.1)
+    };
+    let h = ((RATATUI_SAFE_MAX_CELLS as f32 / aspect).sqrt().floor() as u16).max(1);
+    let w = ((h as f32 * aspect).floor() as u16).max(1);
+    Rect {
+        x: area.x,
+        y: area.y,
+        width: w,
+        height: h,
+    }
 }
 
 fn target_fps_for_profile(profile: PerfProfile) -> f32 {
@@ -2149,6 +2614,7 @@ mod tests {
     fn test_state() -> StartWizardState {
         let model_entries = vec![StartEntry::from_path(Path::new("miku.glb"))];
         let music_entries = vec![StartEntry::from_path(Path::new("world.mp3"))];
+        let camera_entries = vec![StartEntry::from_path(Path::new("world_is_mine.vmd"))];
         let stage_entries = vec![StageChoice {
             name: "default-stage".to_owned(),
             status: StageStatus::Ready,
@@ -2160,6 +2626,7 @@ mod tests {
             model_entries,
             music_entries,
             stage_entries,
+            camera_entries,
             StartWizardDefaults::default(),
             120,
             35,
@@ -2182,6 +2649,12 @@ mod tests {
             StartWizardAction::Continue
         ));
         assert_eq!(state.step, StartWizardStep::Stage);
+
+        assert!(matches!(
+            state.apply_event(key(KeyCode::Enter)),
+            StartWizardAction::Continue
+        ));
+        assert_eq!(state.step, StartWizardStep::Camera);
 
         assert!(matches!(
             state.apply_event(key(KeyCode::Enter)),
@@ -2267,6 +2740,7 @@ mod tests {
                         Path::new("assets/glb"),
                         Path::new("assets/music"),
                         Path::new("assets/stage"),
+                        Path::new("assets/camera"),
                         &state,
                         UiLanguage::Ko,
                     );

@@ -6,8 +6,8 @@ use std::{
 use crate::scene::{
     AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
     CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
-    ClarityProfile, ColorMode, ContrastProfile, DetailProfile, PerfProfile, RenderBackend,
-    SyncSpeedMode, TextureSamplingMode, ThemeStyle,
+    ClarityProfile, ColorMode, ContrastProfile, DetailProfile, GraphicsProtocol, PerfProfile,
+    RenderBackend, RenderOutputMode, SyncPolicy, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,9 @@ pub struct GasciiConfig {
     pub font_preset_enabled: bool,
     pub color_mode: Option<ColorMode>,
     pub ascii_force_color: bool,
+    pub output_mode: RenderOutputMode,
+    pub graphics_protocol: GraphicsProtocol,
+    pub recover_color_auto: bool,
     pub braille_profile: BrailleProfile,
     pub theme_style: ThemeStyle,
     pub audio_reactive: AudioReactiveMode,
@@ -41,6 +44,8 @@ pub struct GasciiConfig {
     pub wasd_mode: CameraControlMode,
     pub freefly_speed: f32,
     pub camera_look_speed: f32,
+    pub camera_dir: PathBuf,
+    pub camera_selection: String,
     pub camera_mode: CameraMode,
     pub camera_align_preset: CameraAlignPreset,
     pub camera_unit_scale: f32,
@@ -60,6 +65,11 @@ pub struct GasciiConfig {
     pub contrast_profile: ContrastProfile,
     pub sync_offset_ms: i32,
     pub sync_speed_mode: SyncSpeedMode,
+    pub sync_policy: SyncPolicy,
+    pub sync_hard_snap_ms: u32,
+    pub sync_kp: f32,
+    pub upscale_factor: u32,
+    pub upscale_sharpen: f32,
     pub triangle_stride: usize,
     pub min_triangle_area_px2: f32,
 }
@@ -72,6 +82,9 @@ impl Default for GasciiConfig {
             font_preset_enabled: false,
             color_mode: None,
             ascii_force_color: true,
+            output_mode: RenderOutputMode::Text,
+            graphics_protocol: GraphicsProtocol::Auto,
+            recover_color_auto: true,
             braille_profile: BrailleProfile::Safe,
             theme_style: ThemeStyle::Theater,
             audio_reactive: AudioReactiveMode::On,
@@ -90,7 +103,9 @@ impl Default for GasciiConfig {
             wasd_mode: CameraControlMode::FreeFly,
             freefly_speed: 1.0,
             camera_look_speed: 1.0,
-            camera_mode: CameraMode::Vmd,
+            camera_dir: PathBuf::from("assets/camera"),
+            camera_selection: "none".to_owned(),
+            camera_mode: CameraMode::Off,
             camera_align_preset: CameraAlignPreset::Std,
             camera_unit_scale: 0.08,
             camera_vmd_fps: 30.0,
@@ -109,6 +124,11 @@ impl Default for GasciiConfig {
             contrast_profile: ContrastProfile::Adaptive,
             sync_offset_ms: 0,
             sync_speed_mode: SyncSpeedMode::AutoDurationFit,
+            sync_policy: SyncPolicy::Continuous,
+            sync_hard_snap_ms: 120,
+            sync_kp: 0.15,
+            upscale_factor: 2,
+            upscale_sharpen: 0.20,
             triangle_stride: 1,
             min_triangle_area_px2: 0.0,
         }
@@ -197,6 +217,39 @@ pub fn load_gascii_config(path: &Path) -> GasciiConfig {
                     SyncSpeedMode::AutoDurationFit
                 };
             }
+            "sync_policy" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.sync_policy = if lower.starts_with("fix") {
+                    SyncPolicy::Fixed
+                } else if lower.starts_with("man") {
+                    SyncPolicy::Manual
+                } else {
+                    SyncPolicy::Continuous
+                };
+            }
+            "sync_hard_snap_ms" => {
+                if let Ok(parsed) = value.parse::<u32>() {
+                    cfg.sync_hard_snap_ms = parsed.clamp(10, 2000);
+                }
+            }
+            "sync_kp" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    cfg.sync_kp = parsed.clamp(0.01, 1.0);
+                }
+            }
+            "upscale_factor" => {
+                if let Ok(parsed) = value.parse::<u32>() {
+                    cfg.upscale_factor = match parsed {
+                        1 | 2 | 4 => parsed,
+                        _ => 2,
+                    };
+                }
+            }
+            "upscale_sharpen" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    cfg.upscale_sharpen = parsed.clamp(0.0, 2.0);
+                }
+            }
             "triangle_stride" | "tri_stride" => {
                 if let Ok(parsed) = value.parse::<usize>() {
                     cfg.triangle_stride = parsed.clamp(1, 16);
@@ -219,6 +272,32 @@ pub fn load_gascii_config(path: &Path) -> GasciiConfig {
                 if let Some(parsed) = parse_bool(value) {
                     cfg.ascii_force_color = parsed;
                 }
+            }
+            "output_mode" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.output_mode = if lower.starts_with("text") {
+                    RenderOutputMode::Text
+                } else if lower.starts_with("graph") {
+                    RenderOutputMode::Graphics
+                } else {
+                    RenderOutputMode::Hybrid
+                };
+            }
+            "recover_color" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.recover_color_auto = !lower.starts_with("off");
+            }
+            "graphics_protocol" | "graphics" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.graphics_protocol = if lower.starts_with("kit") {
+                    GraphicsProtocol::Kitty
+                } else if lower.starts_with("iterm") {
+                    GraphicsProtocol::Iterm2
+                } else if lower.starts_with("none") || lower == "0" || lower == "off" {
+                    GraphicsProtocol::None
+                } else {
+                    GraphicsProtocol::Auto
+                };
             }
             "braille_profile" => {
                 let lower = value.to_ascii_lowercase();
@@ -362,6 +441,18 @@ pub fn load_gascii_config(path: &Path) -> GasciiConfig {
                     cfg.camera_look_speed = parsed.clamp(0.1, 8.0);
                 }
             }
+            "camera_dir" => {
+                let raw = value.trim().trim_matches('"').trim_matches('\'');
+                if !raw.is_empty() {
+                    cfg.camera_dir = PathBuf::from(raw);
+                }
+            }
+            "camera_selection" | "camera" => {
+                let raw = value.trim().trim_matches('"').trim_matches('\'');
+                if !raw.is_empty() {
+                    cfg.camera_selection = raw.to_owned();
+                }
+            }
             "camera_mode" => {
                 let lower = value.to_ascii_lowercase();
                 cfg.camera_mode = if lower.starts_with("off") {
@@ -483,6 +574,9 @@ mod tests {
         assert!(!cfg.font_preset_enabled);
         assert_eq!(cfg.color_mode, None);
         assert!(cfg.ascii_force_color);
+        assert_eq!(cfg.output_mode, RenderOutputMode::Text);
+        assert_eq!(cfg.graphics_protocol, GraphicsProtocol::Auto);
+        assert!(cfg.recover_color_auto);
         assert_eq!(cfg.braille_profile, BrailleProfile::Safe);
         assert_eq!(cfg.theme_style, ThemeStyle::Theater);
         assert_eq!(cfg.audio_reactive, AudioReactiveMode::On);
@@ -501,7 +595,9 @@ mod tests {
         assert_eq!(cfg.wasd_mode, CameraControlMode::FreeFly);
         assert!((cfg.freefly_speed - 1.0).abs() < 1e-6);
         assert!((cfg.camera_look_speed - 1.0).abs() < 1e-6);
-        assert_eq!(cfg.camera_mode, CameraMode::Vmd);
+        assert_eq!(cfg.camera_dir, PathBuf::from("assets/camera"));
+        assert_eq!(cfg.camera_selection, "none");
+        assert_eq!(cfg.camera_mode, CameraMode::Off);
         assert_eq!(cfg.camera_align_preset, CameraAlignPreset::Std);
         assert!((cfg.camera_unit_scale - 0.08).abs() < 1e-6);
         assert!((cfg.camera_vmd_fps - 30.0).abs() < 1e-6);
@@ -520,6 +616,11 @@ mod tests {
         assert_eq!(cfg.contrast_profile, ContrastProfile::Adaptive);
         assert_eq!(cfg.sync_offset_ms, 0);
         assert_eq!(cfg.sync_speed_mode, SyncSpeedMode::AutoDurationFit);
+        assert_eq!(cfg.sync_policy, SyncPolicy::Continuous);
+        assert_eq!(cfg.sync_hard_snap_ms, 120);
+        assert!((cfg.sync_kp - 0.15).abs() < 1e-6);
+        assert_eq!(cfg.upscale_factor, 2);
+        assert!((cfg.upscale_sharpen - 0.20).abs() < 1e-6);
         assert_eq!(cfg.triangle_stride, 1);
         assert_eq!(cfg.min_triangle_area_px2, 0.0);
     }
@@ -569,13 +670,18 @@ mod tests {
         let path = dir.path().join("Gascii.config");
         fs::write(
             &path,
-            "cell_aspect_mode = manual\ncell_aspect_trim = 1.15\ncontrast_profile = fixed\nsync_offset_ms = -120\nsync_speed_mode = realtime\ncolor_mode=ansi\nascii_force_color=false\nbraille_profile=normal\ntheme=holo\naudio_reactive=high\ncinematic_camera=aggressive\nreactive_gain=0.42\nperf_profile=smooth\ndetail_profile=ultra\nclarity_profile=extreme\nansi_quantization=off\nbackend=gpu-preview\nstage_dir=assets/stage\nstage_selection=world is mine\nexposure_bias=0.18\ncenter_lock=false\ncenter_lock_mode=mixed\nwasd_mode=orbit\nfreefly_speed=2.4\ncamera_look_speed=1.8\ncamera_mode=blend\ncamera_align_preset=alt-b\ncamera_unit_scale=0.12\ncamera_vmd_fps=60\ncamera_vmd_path=assets/camera/world_is_mine.vmd\ncamera_focus=face\nmaterial_color=off\ntexture_sampling=bilinear\nbraille_aspect_compensation=1.12\nmodel_lift=0.2\nedge_accent_strength=0.5\nbg_suppression=0.42\nstage_level=4\nstage_reactive=off\n",
+            "cell_aspect_mode = manual\ncell_aspect_trim = 1.15\ncontrast_profile = fixed\nsync_offset_ms = -120\nsync_speed_mode = realtime\nsync_policy = fixed\nsync_hard_snap_ms = 160\nsync_kp = 0.2\ncolor_mode=ansi\nascii_force_color=false\noutput_mode=graphics\nrecover_color=off\ngraphics_protocol=kitty\nupscale_factor=4\nupscale_sharpen=0.6\nbraille_profile=normal\ntheme=holo\naudio_reactive=high\ncinematic_camera=aggressive\nreactive_gain=0.42\nperf_profile=smooth\ndetail_profile=ultra\nclarity_profile=extreme\nansi_quantization=off\nbackend=gpu-preview\nstage_dir=assets/stage\nstage_selection=world is mine\nexposure_bias=0.18\ncenter_lock=false\ncenter_lock_mode=mixed\nwasd_mode=orbit\nfreefly_speed=2.4\ncamera_look_speed=1.8\ncamera_dir=assets/camera\ncamera_selection=none\ncamera_mode=blend\ncamera_align_preset=alt-b\ncamera_unit_scale=0.12\ncamera_vmd_fps=60\ncamera_vmd_path=assets/camera/world_is_mine.vmd\ncamera_focus=face\nmaterial_color=off\ntexture_sampling=bilinear\nbraille_aspect_compensation=1.12\nmodel_lift=0.2\nedge_accent_strength=0.5\nbg_suppression=0.42\nstage_level=4\nstage_reactive=off\n",
         )
         .expect("write config");
 
         let cfg = load_gascii_config(&path);
         assert_eq!(cfg.color_mode, Some(ColorMode::Ansi));
         assert!(!cfg.ascii_force_color);
+        assert_eq!(cfg.output_mode, RenderOutputMode::Graphics);
+        assert!(!cfg.recover_color_auto);
+        assert_eq!(cfg.graphics_protocol, GraphicsProtocol::Kitty);
+        assert_eq!(cfg.upscale_factor, 4);
+        assert!((cfg.upscale_sharpen - 0.6).abs() < 1e-6);
         assert_eq!(cfg.braille_profile, BrailleProfile::Normal);
         assert_eq!(cfg.theme_style, ThemeStyle::Holo);
         assert_eq!(cfg.audio_reactive, AudioReactiveMode::High);
@@ -594,6 +700,8 @@ mod tests {
         assert_eq!(cfg.wasd_mode, CameraControlMode::Orbit);
         assert!((cfg.freefly_speed - 2.4).abs() < 1e-6);
         assert!((cfg.camera_look_speed - 1.8).abs() < 1e-6);
+        assert_eq!(cfg.camera_dir, PathBuf::from("assets/camera"));
+        assert_eq!(cfg.camera_selection, "none");
         assert_eq!(cfg.camera_mode, CameraMode::Blend);
         assert_eq!(cfg.camera_align_preset, CameraAlignPreset::AltB);
         assert!((cfg.camera_unit_scale - 0.12).abs() < 1e-6);
@@ -616,5 +724,8 @@ mod tests {
         assert_eq!(cfg.contrast_profile, ContrastProfile::Fixed);
         assert_eq!(cfg.sync_offset_ms, -120);
         assert_eq!(cfg.sync_speed_mode, SyncSpeedMode::Realtime1x);
+        assert_eq!(cfg.sync_policy, SyncPolicy::Fixed);
+        assert_eq!(cfg.sync_hard_snap_ms, 160);
+        assert!((cfg.sync_kp - 0.2).abs() < 1e-6);
     }
 }

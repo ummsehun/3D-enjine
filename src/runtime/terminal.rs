@@ -12,7 +12,11 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use crate::{renderer::FrameBuffers, scene::AnsiQuantization};
+use crate::{
+    renderer::FrameBuffers,
+    runtime::graphics_proto::write_graphics_frame,
+    scene::{AnsiQuantization, GraphicsProtocol},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentMode {
@@ -173,6 +177,17 @@ impl TerminalSession {
         self.stdout.flush()?;
         self.presenter.last_has_color = use_ansi;
         self.presenter.last_quantization = quantization;
+        Ok(())
+    }
+
+    pub fn present_graphics(
+        &mut self,
+        frame: &FrameBuffers,
+        protocol: GraphicsProtocol,
+    ) -> Result<()> {
+        write_graphics_frame(&mut self.stdout, frame, protocol)?;
+        // Force a full repaint if/when we fall back to text mode.
+        self.presenter.force_full_repaint = true;
         Ok(())
     }
 

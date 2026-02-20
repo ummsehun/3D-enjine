@@ -11,6 +11,28 @@ pub enum RenderMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderOutputMode {
+    Text,
+    Hybrid,
+    Graphics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphicsProtocol {
+    Auto,
+    Kitty,
+    Iterm2,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncPolicy {
+    Continuous,
+    Fixed,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PerfProfile {
     Balanced,
     Cinematic,
@@ -151,6 +173,9 @@ pub struct RenderConfig {
     pub near: f32,
     pub far: f32,
     pub mode: RenderMode,
+    pub output_mode: RenderOutputMode,
+    pub graphics_protocol: GraphicsProtocol,
+    pub recover_color_auto: bool,
     pub perf_profile: PerfProfile,
     pub detail_profile: DetailProfile,
     pub backend: RenderBackend,
@@ -189,6 +214,9 @@ pub struct RenderConfig {
     pub rim_power: f32,
     pub fog_strength: f32,
     pub contrast_profile: ContrastProfile,
+    pub sync_policy: SyncPolicy,
+    pub sync_hard_snap_ms: u32,
+    pub sync_kp: f32,
     pub contrast_floor: f32,
     pub contrast_gamma: f32,
     pub fog_scale: f32,
@@ -203,6 +231,9 @@ impl Default for RenderConfig {
             near: 0.1,
             far: 100.0,
             mode: RenderMode::Ascii,
+            output_mode: RenderOutputMode::Text,
+            graphics_protocol: GraphicsProtocol::Auto,
+            recover_color_auto: true,
             perf_profile: PerfProfile::Balanced,
             detail_profile: DetailProfile::Balanced,
             backend: RenderBackend::Cpu,
@@ -241,6 +272,9 @@ impl Default for RenderConfig {
             rim_power: 2.0,
             fog_strength: 0.20,
             contrast_profile: ContrastProfile::Adaptive,
+            sync_policy: SyncPolicy::Continuous,
+            sync_hard_snap_ms: 120,
+            sync_kp: 0.15,
             contrast_floor: 0.10,
             contrast_gamma: 0.90,
             fog_scale: 1.0,
@@ -336,6 +370,8 @@ pub struct MaterialCpu {
     pub base_color_uv_transform: Option<UvTransform2D>,
     pub emissive_factor: [f32; 3],
     pub alpha_mode: MaterialAlphaMode,
+    pub alpha_cutoff: f32,
+    pub double_sided: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -8,14 +8,16 @@ CPU-first terminal renderer for 3D meshes/animations (ASCII/Braille) with option
 - GLB/glTF + OBJ loading
 - GLB material color pipeline (`baseColorFactor` + `COLOR_0` + `TEXCOORD_0` + texture sampling)
 - `KHR_texture_transform` 반영(`baseColorTexture` UV transform/texCoord override)
+- `preprocess` 서브커맨드(GLB 텍스처 업스케일/샤프닝, 원본 보존)
 - Skeletal animation playback (glTF skin)
 - Morph target(표정) 애니메이션 재생 (`weights` 채널)
-- `cargo start` Ratatui 단계형 위저드
+- `cargo start` Ratatui 단계형 위저드 (Model → Music → Stage → Camera → Render → Aspect → Confirm)
 - `rodio` 기반 BGM 루프 재생 (`mp3`/`wav`)
 - 오디오 시계 기반 애니메이션 동기화 + 오프셋 보정
 - 자동 셀 비율 추정 + 비율 캘리브레이션
 - 해상도 적응형 대비/안개 보정 (폰트 확대 시 가시성 강화)
 - 출력 경로 최적화(Diff presenter + synchronized update)
+- 하이브리드 출력(`text` + `graphics-protocol(auto/kitty/iTerm2)`) + 자동 폴백
 - 저강도 그라데이션 배경(LOD에 따라 full/reduced/minimal)
 - Braille 2x4 서브픽셀 합성 + safe 가시성 보정
 - ANSI truecolor 하이브리드(테마 기반) + mono fallback
@@ -42,8 +44,10 @@ cargo start --camera-vmd assets/camera/world_is_mine.vmd --camera-mode vmd --cam
 cargo run -- run --scene cube --mode ascii --fps-cap 30
 cargo run -- run --scene glb --glb /path/to/model.glb --fps-cap 0
 cargo run -- run --scene glb --glb /path/to/model.glb --anim 0 --mode ascii --fps-cap 30 --cell-aspect 0.5 --cell-aspect-mode auto --stage-dir assets/stage --stage auto
+cargo run -- run --scene glb --glb /path/to/model.glb --output-mode hybrid --graphics-protocol auto --sync-policy continuous --sync-hard-snap-ms 120 --sync-kp 0.15
 cargo run -- run --scene glb --glb /path/to/model.glb --wasd-mode freefly --freefly-speed 1.2 --camera-look-speed 1.2
 cargo run --features gpu -- run --scene glb --glb /path/to/model.glb --mode braille --color-mode ansi --braille-profile normal --theme neon --perf-profile smooth --backend gpu
+cargo run -- preprocess --glb assets/glb/miku.glb --out assets/glb/miku_up2.glb --upscale-factor 2 --upscale-sharpen 0.20
 cargo run -- run --scene obj --obj /path/to/model.obj --mode ascii --fps-cap 30
 cargo run -- inspect --glb /path/to/model.glb
 cargo run -- preview --glb /path/to/model.glb --anim 0 --camera-vmd assets/camera/world_is_mine.vmd --camera-mode blend --camera-align-preset alt-a --camera-unit-scale 0.08 --port 8787
@@ -55,14 +59,15 @@ cargo run -- bench --scene glb-anim --glb /path/to/model.glb --anim 0 --seconds 
 
 ## Start Wizard (Ratatui)
 
-`cargo start`는 `assets/glb` + `assets/music` + `assets/stage`를 스캔하고 6단계 위저드를 엽니다.
+`cargo start`는 `assets/glb` + `assets/music` + `assets/stage` + `assets/camera`를 스캔하고 7단계 위저드를 엽니다.
 
 1. 모델 선택
 2. 음악 선택 (`없음` 포함)
 3. 스테이지 선택 (`스테이지를 선택해 주세요`, 상태 배지 표시)
-4. 렌더 옵션 (`모드`, `성능/디테일/선명도 프로필`, `ANSI 양자화`, `백엔드`, `중앙 고정/기준`, `WASD 모드/속도`, `카메라 포커스`, `재질색상/텍스처 샘플링`, `model_lift`, `edge_accent`, `스테이지 레벨`, `FPS`, `대비`, `동기화`, `비율 모드`, `폰트 프리셋`)
-5. 비율 캘리브레이션 (원형 프리뷰 + trim 조절)
-6. 확인/실행 (모델/음악/스테이지 상태, 감지/적용 비율, clip/audio 길이, speed factor 표시)
+4. 카메라 선택 (`없음`/`*.vmd` + `mode` + `align preset` + `unit scale`)
+5. 렌더 옵션 (`모드`, `성능/디테일/선명도 프로필`, `ANSI 양자화`, `백엔드`, `중앙 고정/기준`, `WASD 모드/속도`, `카메라 포커스`, `재질색상/텍스처 샘플링`, `model_lift`, `edge_accent`, `스테이지 레벨`, `FPS`, `대비`, `동기화`, `비율 모드`, `폰트 프리셋`)
+6. 비율 캘리브레이션 (원형 프리뷰 + trim 조절)
+7. 확인/실행 (모델/음악/스테이지/카메라 상태, 감지/적용 비율, clip/audio 길이, speed factor 표시)
 
 공통 키:
 
@@ -110,6 +115,8 @@ cargo run -- bench --scene glb-anim --glb /path/to/model.glb --anim 0 --seconds 
 - `wasd_mode = orbit|freefly`
 - `freefly_speed = 0.1..8.0`
 - `camera_look_speed = 0.1..8.0`
+- `camera_dir = assets/camera`
+- `camera_selection = none|auto|<name>|<path>`
 - `camera_mode = off|vmd|blend`
 - `camera_align_preset = std|alt-a|alt-b`
 - `camera_unit_scale = 0.01..2.0`
@@ -126,6 +133,14 @@ cargo run -- bench --scene glb-anim --glb /path/to/model.glb --anim 0 --seconds 
 - `stage_reactive = true|false`
 - `sync_offset_ms = -5000..5000`
 - `sync_speed_mode = auto|realtime`
+- `sync_policy = continuous|fixed|manual`
+- `sync_hard_snap_ms = 10..2000`
+- `sync_kp = 0.01..1.0`
+- `output_mode = text|hybrid|graphics`
+- `graphics_protocol = auto|kitty|iterm2|none`
+- `recover_color = auto|off`
+- `upscale_factor = 1|2|4` (`preprocess` 기본값)
+- `upscale_sharpen = 0.0..2.0` (`preprocess` 기본값)
 - `triangle_stride = 1..16`
 - `min_triangle_area_px2 = 0.0..16.0`
 
@@ -150,6 +165,14 @@ cell_aspect_trim = 1.00
 contrast_profile = adaptive
 sync_offset_ms = 0
 sync_speed_mode = auto
+sync_policy = continuous
+sync_hard_snap_ms = 120
+sync_kp = 0.15
+output_mode = text
+recover_color = auto
+graphics_protocol = auto
+upscale_factor = 2
+upscale_sharpen = 0.20
 color_mode = ansi
 ascii_force_color = true
 braille_profile = safe
@@ -170,7 +193,9 @@ center_lock_mode = root
 wasd_mode = freefly
 freefly_speed = 1.00
 camera_look_speed = 1.00
-camera_mode = vmd
+camera_dir = assets/camera
+camera_selection = none
+camera_mode = off
 camera_align_preset = std
 camera_unit_scale = 0.08
 camera_vmd_fps = 30.0
@@ -206,7 +231,8 @@ min_triangle_area_px2 = 0.08
 - `←/→/↑/↓`: freefly 시점 회전 (`camera_look_speed` 반영)
 - `+` / `-`: stage level up/down (`0..4`)
 - `e` / `E`: exposure bias down/up (`e`는 `--wasd-mode orbit`에서 사용)
-- `f`: center lock on/off toggle
+- `f`: freefly 토글 (on: VMD/시네마틱 트랙 일시중지, off: 트랙 복귀)
+- `t`: center lock on/off toggle
 - `x` / `z`: orbit speed up/down
 - `[` / `]`: zoom out / zoom in
 - `i`/`k`, `j`/`l`, arrow keys: framing move
@@ -227,10 +253,12 @@ min_triangle_area_px2 = 0.08
 - `-` 연타로 저가시성이 지속되면 watchdog이 자동 복구(FullBody + framing reset + exposure 보정)
 - `center_lock=on`일 때 pan 키(`i/j/k/l/u/m`, 화살표)는 비활성화
 - 출력 I/O 실패가 누적되면 `ansi-truecolor -> ansi-q216 -> mono/full` 순서로 자동 폴백
+- `recover_color=auto`이면 성공 프레임 누적 시 `mono -> q216 -> truecolor` 자동 복구
 
 ## Web Preview
 
 - `preview` 명령은 로컬 Three.js 비교 경로를 띄웁니다.
+- `output_mode=hybrid`는 지원 터미널이면 그래픽 프로토콜을 사용하고, 실패 시 즉시 텍스트 경로로 전환합니다.
 - 기본 주소: `http://127.0.0.1:8787`
 - 동기화 채널:
   - WebSocket `/sync` 20Hz 마스터 클럭 브로드캐스트

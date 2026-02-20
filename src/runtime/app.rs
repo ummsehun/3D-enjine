@@ -21,8 +21,8 @@ use crate::{
     animation::{ChannelTarget, compute_global_matrices, default_poses},
     assets::vmd_camera::parse_vmd_camera,
     cli::{
-        BenchArgs, BenchSceneArg, Cli, Commands, InspectArgs, PreviewArgs, RunArgs, RunSceneArg,
-        StartArgs,
+        BenchArgs, BenchSceneArg, Cli, Commands, InspectArgs, PreprocessArgs, PreviewArgs, RunArgs,
+        RunSceneArg, StartArgs,
     },
     engine::camera_track::{CameraTrackSampler, MmdCameraTransform},
     loader,
@@ -31,6 +31,8 @@ use crate::{
     renderer::{Camera, FrameBuffers, GlyphRamp, RenderScratch, RenderStats},
     runtime::{
         config::{GasciiConfig, load_gascii_config},
+        graphics_proto::detect_supported_protocol,
+        preprocess::run_preprocess,
         preview::run_preview_server,
         start_ui::{
             StageChoice, StageStatus, StageTransform, StartWizardDefaults, run_start_wizard,
@@ -39,9 +41,10 @@ use crate::{
     scene::{
         AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
         CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
-        ClarityProfile, ColorMode, ContrastProfile, DetailProfile, FreeFlyState, MeshLayer, Node,
-        PerfProfile, RenderBackend, RenderConfig, RenderMode, SceneCpu, SyncSpeedMode,
-        TextureSamplingMode, ThemeStyle, estimate_cell_aspect_from_window, resolve_cell_aspect,
+        ClarityProfile, ColorMode, ContrastProfile, DetailProfile, FreeFlyState, GraphicsProtocol,
+        MeshLayer, Node, PerfProfile, RenderBackend, RenderConfig, RenderMode, RenderOutputMode,
+        SceneCpu, SyncPolicy, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
+        estimate_cell_aspect_from_window, resolve_cell_aspect,
     },
     terminal::{PresentMode, TerminalSession, supports_truecolor},
 };
@@ -52,6 +55,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Start(args) => start(args),
         Commands::Run(args) => run_interactive(args),
         Commands::Preview(args) => preview(args),
+        Commands::Preprocess(args) => preprocess(args),
         Commands::Bench(args) => bench(args),
         Commands::Inspect(args) => inspect(args),
     }
@@ -71,6 +75,9 @@ const MIN_VISIBLE_HEIGHT_RATIO: f32 = 0.10;
 const MIN_VISIBLE_HEIGHT_TRIGGER_FRAMES: u32 = 10;
 const MIN_VISIBLE_HEIGHT_RECOVER_RATIO: f32 = 0.16;
 const MIN_VISIBLE_HEIGHT_RECOVER_FRAMES: u32 = 30;
+const HYBRID_GRAPHICS_MAX_CELLS: usize = 24_000;
+const HYBRID_GRAPHICS_SLOW_FRAME_MS: f32 = 45.0;
+const HYBRID_GRAPHICS_SLOW_STREAK_LIMIT: u32 = 8;
 
 static PANIC_HOOK_ONCE: Once = Once::new();
 static LAST_RUNTIME_STATE: OnceLock<Mutex<String>> = OnceLock::new();
@@ -114,6 +121,12 @@ struct AudioSyncRuntime {
     playback: MusicPlayback,
     speed_factor: f32,
     envelope: Option<AudioEnvelope>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ContinuousSyncState {
+    anim_time: f32,
+    initialized: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -204,11 +217,188 @@ struct RuntimeInputResult {
     quit: bool,
     status_changed: bool,
     resized: bool,
+    terminal_size_unstable: bool,
     stage_changed: bool,
     center_lock_blocked_pan: bool,
     center_lock_auto_disabled: bool,
+    freefly_toggled: bool,
     zoom_changed: bool,
     last_key: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimeCameraState {
+    control_mode: CameraControlMode,
+    previous_control_mode: CameraControlMode,
+    track_enabled: bool,
+    active_track_mode: CameraMode,
+    saved_track_mode: CameraMode,
+}
+
+impl RuntimeCameraState {
+    fn new(
+        control_mode: CameraControlMode,
+        track_mode: CameraMode,
+        has_track_source: bool,
+    ) -> Self {
+        let track_enabled = has_track_source
+            && !matches!(track_mode, CameraMode::Off)
+            && !matches!(control_mode, CameraControlMode::FreeFly);
+        Self {
+            control_mode,
+            previous_control_mode: CameraControlMode::Orbit,
+            track_enabled,
+            active_track_mode: track_mode,
+            saved_track_mode: track_mode,
+        }
+    }
+
+    fn toggle_freefly(&mut self, has_track_source: bool) -> bool {
+        if !matches!(self.control_mode, CameraControlMode::FreeFly) {
+            self.previous_control_mode = self.control_mode;
+            self.control_mode = CameraControlMode::FreeFly;
+            if self.track_enabled {
+                self.saved_track_mode = self.active_track_mode;
+            }
+            self.track_enabled = false;
+            true
+        } else {
+            self.control_mode = if matches!(self.previous_control_mode, CameraControlMode::FreeFly)
+            {
+                CameraControlMode::Orbit
+            } else {
+                self.previous_control_mode
+            };
+            self.active_track_mode = self.saved_track_mode;
+            self.track_enabled =
+                has_track_source && !matches!(self.active_track_mode, CameraMode::Off);
+            false
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColorPathLevel {
+    Truecolor,
+    Q216,
+    Mono,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ColorRecoveryState {
+    level: ColorPathLevel,
+    target_level: ColorPathLevel,
+    auto_recover: bool,
+    success_streak: u32,
+}
+
+impl ColorRecoveryState {
+    fn from_requested(
+        requested_color: ColorMode,
+        requested_quantization: AnsiQuantization,
+        auto_recover: bool,
+    ) -> Self {
+        let target_level = if matches!(requested_color, ColorMode::Mono) {
+            ColorPathLevel::Mono
+        } else if matches!(requested_quantization, AnsiQuantization::Off) {
+            ColorPathLevel::Truecolor
+        } else {
+            ColorPathLevel::Q216
+        };
+        Self {
+            level: target_level,
+            target_level,
+            auto_recover,
+            success_streak: 0,
+        }
+    }
+
+    fn set_requested(
+        &mut self,
+        requested_color: ColorMode,
+        requested_quantization: AnsiQuantization,
+    ) {
+        self.target_level = if matches!(requested_color, ColorMode::Mono) {
+            ColorPathLevel::Mono
+        } else if matches!(requested_quantization, AnsiQuantization::Off) {
+            ColorPathLevel::Truecolor
+        } else {
+            ColorPathLevel::Q216
+        };
+        self.level = self.target_level;
+        self.success_streak = 0;
+    }
+
+    fn degrade(&mut self, ascii_force_color_active: bool, mode: RenderMode) -> bool {
+        self.success_streak = 0;
+        let previous = self.level;
+        self.level = match self.level {
+            ColorPathLevel::Truecolor => ColorPathLevel::Q216,
+            ColorPathLevel::Q216 => {
+                if matches!(mode, RenderMode::Ascii) && ascii_force_color_active {
+                    ColorPathLevel::Q216
+                } else {
+                    ColorPathLevel::Mono
+                }
+            }
+            ColorPathLevel::Mono => ColorPathLevel::Mono,
+        };
+        self.level != previous
+    }
+
+    fn on_present_success(&mut self) -> bool {
+        if !self.auto_recover {
+            self.success_streak = 0;
+            return false;
+        }
+        if self.level == self.target_level {
+            self.success_streak = 0;
+            return false;
+        }
+        self.success_streak = self.success_streak.saturating_add(1);
+        let threshold = match self.level {
+            ColorPathLevel::Mono => 150,
+            ColorPathLevel::Q216 => 210,
+            ColorPathLevel::Truecolor => u32::MAX,
+        };
+        if self.success_streak < threshold {
+            return false;
+        }
+        self.success_streak = 0;
+        self.level = match self.level {
+            ColorPathLevel::Mono => ColorPathLevel::Q216,
+            ColorPathLevel::Q216 => ColorPathLevel::Truecolor,
+            ColorPathLevel::Truecolor => ColorPathLevel::Truecolor,
+        };
+        true
+    }
+
+    fn apply(
+        &self,
+        color_mode: &mut ColorMode,
+        quantization: &mut AnsiQuantization,
+        mode: RenderMode,
+        ascii_force_color_active: bool,
+    ) {
+        match self.level {
+            ColorPathLevel::Truecolor => {
+                *color_mode = ColorMode::Ansi;
+                *quantization = AnsiQuantization::Off;
+            }
+            ColorPathLevel::Q216 => {
+                *color_mode = ColorMode::Ansi;
+                *quantization = AnsiQuantization::Q216;
+            }
+            ColorPathLevel::Mono => {
+                if matches!(mode, RenderMode::Ascii) && ascii_force_color_active {
+                    *color_mode = ColorMode::Ansi;
+                    *quantization = AnsiQuantization::Q216;
+                } else {
+                    *color_mode = ColorMode::Mono;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -563,6 +753,23 @@ fn start(args: StartArgs) -> Result<()> {
     let music_files = discover_music_files(&args.music_dir)?;
     let stage_dir = resolved_stage_dir(&args.stage_dir, &runtime_cfg);
     let stage_entries = discover_stage_sets(&stage_dir);
+    let camera_dir = resolved_camera_dir(&args.camera_dir, &runtime_cfg);
+    let camera_files = discover_camera_vmds(&camera_dir);
+    let runtime_camera_selector = runtime_cfg.camera_selection.as_str();
+    let cli_camera_selector = args.camera.as_deref();
+    let selector = cli_camera_selector.unwrap_or(runtime_camera_selector);
+    let selector_explicit_none = selector.eq_ignore_ascii_case("none");
+    let selected_camera_path = args
+        .camera_vmd
+        .clone()
+        .or_else(|| resolve_camera_vmd_selector(&camera_files, selector))
+        .or_else(|| {
+            if selector_explicit_none {
+                None
+            } else {
+                runtime_cfg.camera_vmd_path.clone()
+            }
+        });
     let start_mode: RenderMode = args.mode.into();
     let default_color_mode = resolve_effective_color_mode(
         start_mode,
@@ -573,6 +780,8 @@ fn start(args: StartArgs) -> Result<()> {
     );
     let defaults = StartWizardDefaults {
         mode: start_mode,
+        output_mode: visual.output_mode,
+        graphics_protocol: visual.graphics_protocol,
         perf_profile: visual.perf_profile,
         detail_profile: visual.detail_profile,
         clarity_profile: visual.clarity_profile,
@@ -603,14 +812,23 @@ fn start(args: StartArgs) -> Result<()> {
         contrast_profile: visual.contrast_profile,
         sync_offset_ms: sync_defaults.sync_offset_ms,
         sync_speed_mode: sync_defaults.sync_speed_mode,
+        sync_policy: sync_defaults.sync_policy,
+        sync_hard_snap_ms: sync_defaults.sync_hard_snap_ms,
+        sync_kp: sync_defaults.sync_kp,
         font_preset_enabled: runtime_cfg.font_preset_enabled,
+        camera_mode: visual.camera_mode,
+        camera_align_preset: visual.camera_align_preset,
+        camera_unit_scale: visual.camera_unit_scale,
+        camera_vmd_path: selected_camera_path.clone(),
     };
     let Some(selection) = run_start_wizard(
         &args.dir,
         &args.music_dir,
         &stage_dir,
+        &camera_dir,
         &model_files,
         &music_files,
+        &camera_files,
         &stage_entries,
         defaults,
         runtime_cfg.ui_language,
@@ -674,6 +892,9 @@ fn start(args: StartArgs) -> Result<()> {
     let mut config = render_config_from_start(
         &args,
         &ResolvedVisualOptions {
+            output_mode: selection.output_mode,
+            recover_color_auto: visual.recover_color_auto,
+            graphics_protocol: selection.graphics_protocol,
             cell_aspect_mode: selection.cell_aspect_mode,
             cell_aspect_trim: selection.cell_aspect_trim,
             contrast_profile: selection.contrast_profile,
@@ -686,11 +907,11 @@ fn start(args: StartArgs) -> Result<()> {
             wasd_mode: selection.wasd_mode,
             freefly_speed: selection.freefly_speed,
             camera_look_speed: visual.camera_look_speed,
-            camera_mode: visual.camera_mode,
-            camera_align_preset: visual.camera_align_preset,
-            camera_unit_scale: visual.camera_unit_scale,
+            camera_mode: selection.camera_mode,
+            camera_align_preset: selection.camera_align_preset,
+            camera_unit_scale: selection.camera_unit_scale,
             camera_vmd_fps: visual.camera_vmd_fps,
-            camera_vmd_path: visual.camera_vmd_path.clone(),
+            camera_vmd_path: selection.camera_vmd_path.clone(),
             camera_focus: selection.camera_focus,
             material_color: selection.material_color,
             texture_sampling: selection.texture_sampling,
@@ -712,6 +933,8 @@ fn start(args: StartArgs) -> Result<()> {
         },
     );
     config.mode = selection.mode;
+    config.output_mode = selection.output_mode;
+    config.graphics_protocol = selection.graphics_protocol;
     config.perf_profile = selection.perf_profile;
     config.detail_profile = selection.detail_profile;
     config.backend = selection.backend;
@@ -730,11 +953,11 @@ fn start(args: StartArgs) -> Result<()> {
     let wasd_mode = selection.wasd_mode;
     let freefly_speed = selection.freefly_speed;
     let camera_settings = RuntimeCameraSettings {
-        mode: visual.camera_mode,
-        align_preset: visual.camera_align_preset,
-        unit_scale: visual.camera_unit_scale,
+        mode: selection.camera_mode,
+        align_preset: selection.camera_align_preset,
+        unit_scale: selection.camera_unit_scale,
         vmd_fps: visual.camera_vmd_fps,
-        vmd_path: visual.camera_vmd_path.clone(),
+        vmd_path: selection.camera_vmd_path.clone(),
         look_speed: visual.camera_look_speed,
     };
     config.stage_level = selection.stage_level;
@@ -746,6 +969,9 @@ fn start(args: StartArgs) -> Result<()> {
     config.model_lift = selection.model_lift;
     config.edge_accent_strength = selection.edge_accent_strength;
     config.braille_aspect_compensation = selection.braille_aspect_compensation;
+    config.sync_policy = selection.sync_policy;
+    config.sync_hard_snap_ms = selection.sync_hard_snap_ms;
+    config.sync_kp = selection.sync_kp;
     apply_runtime_render_tuning(&mut config, &runtime_cfg);
     run_scene_interactive(
         scene,
@@ -768,6 +994,24 @@ fn run_interactive(args: RunArgs) -> Result<()> {
     let runtime_cfg = load_runtime_config();
     let visual = resolve_visual_options_for_run(&args, &runtime_cfg);
     let sync = resolve_sync_options_for_run(&args, &runtime_cfg);
+    let camera_dir = resolved_camera_dir(&args.camera_dir, &runtime_cfg);
+    let camera_files = discover_camera_vmds(&camera_dir);
+    let camera_selector = args
+        .camera
+        .as_deref()
+        .unwrap_or(&runtime_cfg.camera_selection);
+    let selector_explicit_none = camera_selector.eq_ignore_ascii_case("none");
+    let resolved_camera_vmd_path = args
+        .camera_vmd
+        .clone()
+        .or_else(|| resolve_camera_vmd_selector(&camera_files, camera_selector))
+        .or_else(|| {
+            if selector_explicit_none {
+                None
+            } else {
+                visual.camera_vmd_path.clone()
+            }
+        });
     let (mut scene, animation_index, rotates_without_animation) = load_scene_for_run(&args)?;
     let stage_dir = resolved_stage_dir(&args.stage_dir, &runtime_cfg);
     let stage_selector = resolved_stage_selector(args.stage.as_deref(), &runtime_cfg);
@@ -807,13 +1051,16 @@ fn run_interactive(args: RunArgs) -> Result<()> {
         }
     }
     let mut config = render_config_from_run(&args, &visual);
+    config.sync_policy = sync.sync_policy;
+    config.sync_hard_snap_ms = sync.sync_hard_snap_ms;
+    config.sync_kp = sync.sync_kp;
     apply_runtime_render_tuning(&mut config, &runtime_cfg);
     let camera_settings = RuntimeCameraSettings {
         mode: visual.camera_mode,
         align_preset: visual.camera_align_preset,
         unit_scale: visual.camera_unit_scale,
         vmd_fps: visual.camera_vmd_fps,
-        vmd_path: visual.camera_vmd_path.clone(),
+        vmd_path: resolved_camera_vmd_path,
         look_speed: visual.camera_look_speed,
     };
     run_scene_interactive(
@@ -835,12 +1082,31 @@ fn run_interactive(args: RunArgs) -> Result<()> {
 
 fn preview(args: PreviewArgs) -> Result<()> {
     let runtime_cfg = load_runtime_config();
+    let camera_dir = runtime_cfg.camera_dir.clone();
+    let camera_files = discover_camera_vmds(&camera_dir);
+    let selector_explicit_none = runtime_cfg.camera_selection.eq_ignore_ascii_case("none");
     let camera_path = args
         .camera_vmd
         .clone()
-        .or_else(|| runtime_cfg.camera_vmd_path.clone())
-        .or_else(|| discover_default_camera_vmd(Path::new("assets/camera")));
+        .or_else(|| {
+            if selector_explicit_none {
+                None
+            } else {
+                runtime_cfg.camera_vmd_path.clone()
+            }
+        })
+        .or_else(|| {
+            if selector_explicit_none {
+                None
+            } else {
+                resolve_camera_vmd_selector(&camera_files, &runtime_cfg.camera_selection)
+            }
+        });
     run_preview_server(&args, camera_path)
+}
+
+fn preprocess(args: PreprocessArgs) -> Result<()> {
+    run_preprocess(&args)
 }
 
 fn load_runtime_config() -> GasciiConfig {
@@ -849,6 +1115,9 @@ fn load_runtime_config() -> GasciiConfig {
 
 #[derive(Debug, Clone)]
 struct ResolvedVisualOptions {
+    output_mode: RenderOutputMode,
+    recover_color_auto: bool,
+    graphics_protocol: GraphicsProtocol,
     cell_aspect_mode: CellAspectMode,
     cell_aspect_trim: f32,
     contrast_profile: ContrastProfile,
@@ -890,6 +1159,9 @@ struct ResolvedVisualOptions {
 struct ResolvedSyncOptions {
     sync_offset_ms: i32,
     sync_speed_mode: SyncSpeedMode,
+    sync_policy: SyncPolicy,
+    sync_hard_snap_ms: u32,
+    sync_kp: f32,
 }
 
 fn resolve_visual_options_for_start(
@@ -897,6 +1169,18 @@ fn resolve_visual_options_for_start(
     runtime_cfg: &GasciiConfig,
 ) -> ResolvedVisualOptions {
     ResolvedVisualOptions {
+        output_mode: args
+            .output_mode
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.output_mode),
+        recover_color_auto: args
+            .recover_color
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.recover_color_auto),
+        graphics_protocol: args
+            .graphics_protocol
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.graphics_protocol),
         cell_aspect_mode: args
             .cell_aspect_mode
             .map(Into::into)
@@ -961,8 +1245,7 @@ fn resolve_visual_options_for_start(
         camera_vmd_path: args
             .camera_vmd
             .clone()
-            .or(runtime_cfg.camera_vmd_path.clone())
-            .or_else(|| discover_default_camera_vmd(Path::new("assets/camera"))),
+            .or(runtime_cfg.camera_vmd_path.clone()),
         camera_focus: args
             .camera_focus
             .map(Into::into)
@@ -1028,6 +1311,18 @@ fn resolve_visual_options_for_run(
     runtime_cfg: &GasciiConfig,
 ) -> ResolvedVisualOptions {
     ResolvedVisualOptions {
+        output_mode: args
+            .output_mode
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.output_mode),
+        recover_color_auto: args
+            .recover_color
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.recover_color_auto),
+        graphics_protocol: args
+            .graphics_protocol
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.graphics_protocol),
         cell_aspect_mode: args
             .cell_aspect_mode
             .map(Into::into)
@@ -1092,8 +1387,7 @@ fn resolve_visual_options_for_run(
         camera_vmd_path: args
             .camera_vmd
             .clone()
-            .or(runtime_cfg.camera_vmd_path.clone())
-            .or_else(|| discover_default_camera_vmd(Path::new("assets/camera"))),
+            .or(runtime_cfg.camera_vmd_path.clone()),
         camera_focus: args
             .camera_focus
             .map(Into::into)
@@ -1159,6 +1453,15 @@ fn resolve_visual_options_for_bench(
     runtime_cfg: &GasciiConfig,
 ) -> ResolvedVisualOptions {
     ResolvedVisualOptions {
+        output_mode: args
+            .output_mode
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.output_mode),
+        recover_color_auto: runtime_cfg.recover_color_auto,
+        graphics_protocol: args
+            .graphics_protocol
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.graphics_protocol),
         cell_aspect_mode: args
             .cell_aspect_mode
             .map(Into::into)
@@ -1199,10 +1502,7 @@ fn resolve_visual_options_for_bench(
         camera_align_preset: runtime_cfg.camera_align_preset,
         camera_unit_scale: runtime_cfg.camera_unit_scale.clamp(0.01, 2.0),
         camera_vmd_fps: runtime_cfg.camera_vmd_fps.clamp(1.0, 240.0),
-        camera_vmd_path: runtime_cfg
-            .camera_vmd_path
-            .clone()
-            .or_else(|| discover_default_camera_vmd(Path::new("assets/camera"))),
+        camera_vmd_path: runtime_cfg.camera_vmd_path.clone(),
         camera_focus: args
             .camera_focus
             .map(Into::into)
@@ -1276,6 +1576,15 @@ fn resolve_sync_options_for_start(
             .sync_speed_mode
             .map(Into::into)
             .unwrap_or(runtime_cfg.sync_speed_mode),
+        sync_policy: args
+            .sync_policy
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.sync_policy),
+        sync_hard_snap_ms: args
+            .sync_hard_snap_ms
+            .unwrap_or(runtime_cfg.sync_hard_snap_ms)
+            .clamp(10, 2_000),
+        sync_kp: args.sync_kp.unwrap_or(runtime_cfg.sync_kp).clamp(0.01, 1.0),
     }
 }
 
@@ -1289,6 +1598,15 @@ fn resolve_sync_options_for_run(args: &RunArgs, runtime_cfg: &GasciiConfig) -> R
             .sync_speed_mode
             .map(Into::into)
             .unwrap_or(runtime_cfg.sync_speed_mode),
+        sync_policy: args
+            .sync_policy
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.sync_policy),
+        sync_hard_snap_ms: args
+            .sync_hard_snap_ms
+            .unwrap_or(runtime_cfg.sync_hard_snap_ms)
+            .clamp(10, 2_000),
+        sync_kp: args.sync_kp.unwrap_or(runtime_cfg.sync_kp).clamp(0.01, 1.0),
     }
 }
 
@@ -1512,10 +1830,12 @@ fn run_scene_interactive(
     let mut center_lock_enabled = config.center_lock;
     let center_lock_mode = config.center_lock_mode;
     let mut stage_level = config.stage_level.min(4);
-    let mut color_mode =
+    let mut requested_color_mode =
         resolve_effective_color_mode(config.mode, config.color_mode, config.ascii_force_color);
-    let mut ascii_force_color_active = config.ascii_force_color;
-    let mut ansi_quantization = config.ansi_quantization;
+    let ascii_force_color_active = config.ascii_force_color;
+    let requested_ansi_quantization = config.ansi_quantization;
+    let mut color_mode = requested_color_mode;
+    let mut ansi_quantization = requested_ansi_quantization;
     let mut braille_profile = config.braille_profile;
     let mut cinematic_mode = config.cinematic_camera;
     let camera_focus_mode = config.camera_focus;
@@ -1549,6 +1869,56 @@ fn run_scene_interactive(
     let mut freefly_state = freefly_state_from_camera(initial_orbit_camera, freefly_speed);
     let initial_freefly_state = freefly_state;
     let loaded_camera_track = load_camera_track(&camera_settings);
+    let mut runtime_camera = RuntimeCameraState::new(
+        wasd_mode,
+        camera_settings.mode,
+        loaded_camera_track.is_some(),
+    );
+    let mut color_recovery = ColorRecoveryState::from_requested(
+        requested_color_mode,
+        requested_ansi_quantization,
+        config.recover_color_auto,
+    );
+    color_recovery.apply(
+        &mut color_mode,
+        &mut ansi_quantization,
+        config.mode,
+        ascii_force_color_active,
+    );
+    let mut active_graphics_protocol = match config.output_mode {
+        RenderOutputMode::Text => None,
+        RenderOutputMode::Hybrid | RenderOutputMode::Graphics => {
+            detect_supported_protocol(config.graphics_protocol)
+        }
+    };
+    if matches!(config.output_mode, RenderOutputMode::Graphics)
+        && active_graphics_protocol.is_none()
+    {
+        bail!(
+            "graphics output requested but no supported protocol found (requested {:?})",
+            config.graphics_protocol
+        );
+    }
+    if matches!(config.output_mode, RenderOutputMode::Hybrid) && active_graphics_protocol.is_none()
+    {
+        last_osd_notice = Some("hybrid fallback: text (graphics unsupported)".to_owned());
+        osd_until = Some(Instant::now() + Duration::from_secs(3));
+    }
+    if matches!(config.output_mode, RenderOutputMode::Hybrid)
+        && active_graphics_protocol.is_some()
+        && usize::from(frame.width).saturating_mul(usize::from(frame.height))
+            > HYBRID_GRAPHICS_MAX_CELLS
+    {
+        active_graphics_protocol = None;
+        last_osd_notice = Some("hybrid fallback: text (terminal too large)".to_owned());
+        osd_until = Some(Instant::now() + Duration::from_secs(3));
+    }
+    let clip_duration = animation_index
+        .and_then(|idx| scene.animations.get(idx))
+        .map(|clip| clip.duration)
+        .filter(|duration| *duration > f32::EPSILON);
+    let mut continuous_sync_state = ContinuousSyncState::default();
+    let mut graphics_slow_streak: u32 = 0;
     if camera_settings.vmd_path.is_some() && loaded_camera_track.is_none() {
         eprintln!("warning: camera VMD could not be loaded. fallback to runtime camera.");
     }
@@ -1589,7 +1959,7 @@ fn run_scene_interactive(
             &mut cinematic_mode,
             &mut reactive_gain,
             &mut exposure_bias,
-            wasd_mode,
+            &mut runtime_camera.control_mode,
             camera_settings.look_speed,
             &mut freefly_state,
         )?;
@@ -1604,8 +1974,15 @@ fn run_scene_interactive(
             exposure_auto_boost.on_resize();
             last_render_stats = RenderStats::default();
             render_scratch.reset_exposure();
-            last_osd_notice = Some(format!("resize: {}x{}", frame.width, frame.height));
-            osd_until = Some(Instant::now() + Duration::from_secs(2));
+            if input.terminal_size_unstable {
+                last_osd_notice = Some("resize unstable: waiting for terminal recovery".to_owned());
+                osd_until = Some(Instant::now() + Duration::from_secs(2));
+                thread::sleep(Duration::from_millis(16));
+                continue;
+            } else {
+                last_osd_notice = Some(format!("resize: {}x{}", frame.width, frame.height));
+                osd_until = Some(Instant::now() + Duration::from_secs(2));
+            }
         }
         if input.status_changed {
             osd_until = Some(Instant::now() + Duration::from_secs(2));
@@ -1615,7 +1992,7 @@ fn run_scene_interactive(
             osd_until = Some(Instant::now() + Duration::from_secs(2));
         }
         if input.center_lock_blocked_pan {
-            last_osd_notice = Some("center-lock on: pan disabled (press f to unlock)".to_owned());
+            last_osd_notice = Some("center-lock on: pan disabled (press t to unlock)".to_owned());
             osd_until = Some(Instant::now() + Duration::from_secs(2));
         }
         if input.center_lock_auto_disabled {
@@ -1624,6 +2001,23 @@ fn run_scene_interactive(
         }
         if input.zoom_changed {
             screen_fit.on_manual_zoom();
+        }
+        if input.freefly_toggled {
+            let entered_freefly = runtime_camera.toggle_freefly(loaded_camera_track.is_some());
+            if entered_freefly {
+                if center_lock_enabled {
+                    center_lock_enabled = false;
+                    center_lock_state.reset();
+                }
+                last_osd_notice = Some("freefly on (track paused)".to_owned());
+            } else {
+                last_osd_notice = Some(if runtime_camera.track_enabled {
+                    "freefly off (track resumed)".to_owned()
+                } else {
+                    "freefly off".to_owned()
+                });
+            }
+            osd_until = Some(Instant::now() + Duration::from_secs(2));
         }
         if input.last_key == Some("c") {
             freefly_state = initial_freefly_state;
@@ -1634,6 +2028,17 @@ fn run_scene_interactive(
                 osd_until = Some(Instant::now() + Duration::from_secs(2));
             }
             color_mode = ColorMode::Ansi;
+        }
+        if input.last_key == Some("n") {
+            requested_color_mode =
+                resolve_effective_color_mode(config.mode, color_mode, ascii_force_color_active);
+            color_recovery.set_requested(requested_color_mode, requested_ansi_quantization);
+            color_recovery.apply(
+                &mut color_mode,
+                &mut ansi_quantization,
+                config.mode,
+                ascii_force_color_active,
+            );
         }
 
         let elapsed_wall = start.elapsed().as_secs_f32();
@@ -1662,12 +2067,19 @@ fn run_scene_interactive(
         };
         reactive_state.energy = raw_energy;
         reactive_state.smoothed_energy += (raw_energy - reactive_state.smoothed_energy) * 0.18;
-        let animation_time = if elapsed_audio.is_some() {
-            compute_animation_time(elapsed_wall, elapsed_audio, sync_speed, sync_offset_ms)
-        } else {
-            let interpolated = sim_time + sim_accum / fixed_step * fixed_step;
-            compute_animation_time(interpolated, None, sync_speed, sync_offset_ms)
-        };
+        let interpolated_wall = sim_time + sim_accum / fixed_step * fixed_step;
+        let animation_time = compute_animation_time(
+            &mut continuous_sync_state,
+            config.sync_policy,
+            dt,
+            interpolated_wall,
+            elapsed_audio,
+            sync_speed,
+            sync_offset_ms,
+            config.sync_hard_snap_ms,
+            config.sync_kp,
+            clip_duration,
+        );
         pipeline.prepare_frame(&scene, animation_time, animation_index);
         let rotation = if animation_index.is_some() {
             0.0
@@ -1737,7 +2149,7 @@ fn run_scene_interactive(
         );
         let effective_zoom = (user_zoom * screen_fit.auto_zoom_gain).clamp(0.20, 8.0);
         let auto_radius_shrink = auto_radius_guard.shrink_ratio;
-        let mut camera = if matches!(wasd_mode, CameraControlMode::FreeFly) {
+        let mut camera = if matches!(runtime_camera.control_mode, CameraControlMode::FreeFly) {
             center_lock_state.reset();
             freefly_camera(freefly_state)
         } else {
@@ -1777,28 +2189,31 @@ fn run_scene_interactive(
                     ),
             )
         };
-        if let Some(track) = loaded_camera_track.as_ref() {
-            if let Some(vmd_pose) = track
-                .sampler
-                .sample_pose(animation_time, track.transform, true)
-            {
-                match camera_settings.mode {
-                    CameraMode::Off => {}
-                    CameraMode::Vmd => {
-                        camera.eye = vmd_pose.eye;
-                        camera.target = vmd_pose.target;
-                        camera.up = vmd_pose.up;
-                        frame_config.fov_deg = vmd_pose.fov_deg;
-                    }
-                    CameraMode::Blend => {
-                        camera.eye = camera.eye.lerp(vmd_pose.eye, 0.70);
-                        camera.target = camera.target.lerp(vmd_pose.target, 0.70);
-                        camera.up = camera.up.lerp(vmd_pose.up, 0.70).normalize_or_zero();
-                        if camera.up.length_squared() <= f32::EPSILON {
-                            camera.up = Vec3::Y;
+        if runtime_camera.track_enabled {
+            if let Some(track) = loaded_camera_track.as_ref() {
+                if let Some(vmd_pose) =
+                    track
+                        .sampler
+                        .sample_pose(animation_time, track.transform, true)
+                {
+                    match runtime_camera.active_track_mode {
+                        CameraMode::Off => {}
+                        CameraMode::Vmd => {
+                            camera.eye = vmd_pose.eye;
+                            camera.target = vmd_pose.target;
+                            camera.up = vmd_pose.up;
+                            frame_config.fov_deg = vmd_pose.fov_deg;
                         }
-                        frame_config.fov_deg =
-                            frame_config.fov_deg * 0.30 + vmd_pose.fov_deg * 0.70;
+                        CameraMode::Blend => {
+                            camera.eye = camera.eye.lerp(vmd_pose.eye, 0.70);
+                            camera.target = camera.target.lerp(vmd_pose.target, 0.70);
+                            camera.up = camera.up.lerp(vmd_pose.up, 0.70).normalize_or_zero();
+                            if camera.up.length_squared() <= f32::EPSILON {
+                                camera.up = Vec3::Y;
+                            }
+                            frame_config.fov_deg =
+                                frame_config.fov_deg * 0.30 + vmd_pose.fov_deg * 0.70;
+                        }
                     }
                 }
             }
@@ -1897,29 +2312,37 @@ fn run_scene_interactive(
             overlay_osd(&mut frame, &status);
         }
 
-        let present_result = if matches!(frame_config.color_mode, ColorMode::Ansi) {
+        let present_started = Instant::now();
+        let present_result = if let Some(protocol) = active_graphics_protocol {
+            terminal.present_graphics(&frame, protocol)
+        } else if matches!(frame_config.color_mode, ColorMode::Ansi) {
             terminal.present(&frame, true, ansi_quantization)
         } else {
             terminal.present(&frame, false, ansi_quantization)
         };
         if let Err(err) = present_result {
+            if active_graphics_protocol.is_some() {
+                if matches!(config.output_mode, RenderOutputMode::Hybrid) {
+                    active_graphics_protocol = None;
+                    terminal.force_full_repaint();
+                    last_osd_notice = Some("graphics fallback: text".to_owned());
+                    osd_until = Some(Instant::now() + Duration::from_secs(3));
+                    continue;
+                }
+                return Err(err);
+            }
+
             if is_retryable_io_error(&err) {
                 io_failure_count = io_failure_count.saturating_add(1);
                 if io_failure_count >= 3 {
                     io_failure_count = 0;
-                    if matches!(frame_config.color_mode, ColorMode::Ansi) {
-                        if matches!(ansi_quantization, AnsiQuantization::Off) {
-                            ansi_quantization = AnsiQuantization::Q216;
-                            last_osd_notice = Some(format!(
-                                "io fallback: {}",
-                                color_path_label(color_mode, ansi_quantization)
-                            ));
-                            osd_until = Some(Instant::now() + Duration::from_secs(2));
-                            continue;
-                        }
-                        color_mode = ColorMode::Mono;
-                        ascii_force_color_active = false;
-                    }
+                    color_recovery.degrade(ascii_force_color_active, frame_config.mode);
+                    color_recovery.apply(
+                        &mut color_mode,
+                        &mut ansi_quantization,
+                        frame_config.mode,
+                        ascii_force_color_active,
+                    );
                     terminal.set_present_mode(PresentMode::FullFallback);
                     last_osd_notice = Some(format!(
                         "io fallback: {}",
@@ -1932,19 +2355,13 @@ fn run_scene_interactive(
             io_failure_count = io_failure_count.saturating_add(1);
             if io_failure_count >= 3 {
                 io_failure_count = 0;
-                if matches!(frame_config.color_mode, ColorMode::Ansi) {
-                    if matches!(ansi_quantization, AnsiQuantization::Off) {
-                        ansi_quantization = AnsiQuantization::Q216;
-                        last_osd_notice = Some(format!(
-                            "error fallback: {}",
-                            color_path_label(color_mode, ansi_quantization)
-                        ));
-                        osd_until = Some(Instant::now() + Duration::from_secs(2));
-                        continue;
-                    }
-                    color_mode = ColorMode::Mono;
-                    ascii_force_color_active = false;
-                }
+                color_recovery.degrade(ascii_force_color_active, frame_config.mode);
+                color_recovery.apply(
+                    &mut color_mode,
+                    &mut ansi_quantization,
+                    frame_config.mode,
+                    ascii_force_color_active,
+                );
                 terminal.set_present_mode(PresentMode::FullFallback);
                 last_osd_notice = Some(format!(
                     "error fallback: {}",
@@ -1955,7 +2372,40 @@ fn run_scene_interactive(
             }
             return Err(err);
         }
+        if active_graphics_protocol.is_some() {
+            let present_ms = present_started.elapsed().as_secs_f32() * 1000.0;
+            if present_ms > HYBRID_GRAPHICS_SLOW_FRAME_MS {
+                graphics_slow_streak = graphics_slow_streak.saturating_add(1);
+            } else {
+                graphics_slow_streak = graphics_slow_streak.saturating_sub(1);
+            }
+            if matches!(config.output_mode, RenderOutputMode::Hybrid)
+                && graphics_slow_streak >= HYBRID_GRAPHICS_SLOW_STREAK_LIMIT
+            {
+                active_graphics_protocol = None;
+                graphics_slow_streak = 0;
+                terminal.force_full_repaint();
+                last_osd_notice = Some(format!("hybrid fallback: text ({present_ms:.1}ms)"));
+                osd_until = Some(Instant::now() + Duration::from_secs(3));
+                continue;
+            }
+        } else {
+            graphics_slow_streak = 0;
+        }
         io_failure_count = 0;
+        if color_recovery.on_present_success() {
+            color_recovery.apply(
+                &mut color_mode,
+                &mut ansi_quantization,
+                frame_config.mode,
+                ascii_force_color_active,
+            );
+            last_osd_notice = Some(format!(
+                "color recover: {}",
+                color_path_label(color_mode, ansi_quantization)
+            ));
+            osd_until = Some(Instant::now() + Duration::from_secs(2));
+        }
         if input.last_key.is_some() {
             last_osd_notice = None;
         }
@@ -2216,6 +2666,9 @@ fn render_config_from_run(args: &RunArgs, visual: &ResolvedVisualOptions) -> Ren
         near: args.near,
         far: args.far,
         mode,
+        output_mode: visual.output_mode,
+        graphics_protocol: visual.graphics_protocol,
+        recover_color_auto: visual.recover_color_auto,
         perf_profile: visual.perf_profile,
         detail_profile: visual.detail_profile,
         backend: visual.backend,
@@ -2254,6 +2707,9 @@ fn render_config_from_run(args: &RunArgs, visual: &ResolvedVisualOptions) -> Ren
         rim_power: args.rim_power,
         fog_strength: args.fog_strength,
         contrast_profile: visual.contrast_profile,
+        sync_policy: SyncPolicy::Continuous,
+        sync_hard_snap_ms: 120,
+        sync_kp: 0.15,
         contrast_floor: 0.10,
         contrast_gamma: 0.90,
         fog_scale: 1.0,
@@ -2276,6 +2732,9 @@ fn render_config_from_start(args: &StartArgs, visual: &ResolvedVisualOptions) ->
         near: args.near,
         far: args.far,
         mode,
+        output_mode: visual.output_mode,
+        graphics_protocol: visual.graphics_protocol,
+        recover_color_auto: visual.recover_color_auto,
         perf_profile: visual.perf_profile,
         detail_profile: visual.detail_profile,
         backend: visual.backend,
@@ -2314,6 +2773,9 @@ fn render_config_from_start(args: &StartArgs, visual: &ResolvedVisualOptions) ->
         rim_power: args.rim_power,
         fog_strength: args.fog_strength,
         contrast_profile: visual.contrast_profile,
+        sync_policy: SyncPolicy::Continuous,
+        sync_hard_snap_ms: 120,
+        sync_kp: 0.15,
         contrast_floor: 0.10,
         contrast_gamma: 0.90,
         fog_scale: 1.0,
@@ -2365,10 +2827,15 @@ fn discover_music_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn discover_default_camera_vmd(dir: &Path) -> Option<PathBuf> {
+fn discover_camera_vmds(dir: &Path) -> Vec<PathBuf> {
+    if !dir.exists() || !dir.is_dir() {
+        return Vec::new();
+    }
     let mut files = fs::read_dir(dir)
-        .ok()?
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .map(|entry| entry.path())
         .filter(|path| path.is_file())
         .filter(|path| {
             path.extension()
@@ -2377,19 +2844,53 @@ fn discover_default_camera_vmd(dir: &Path) -> Option<PathBuf> {
                 .unwrap_or(false)
         })
         .collect::<Vec<_>>();
-    if files.is_empty() {
+    files.sort();
+    files
+}
+
+#[cfg(test)]
+fn discover_default_camera_vmd(dir: &Path) -> Option<PathBuf> {
+    resolve_camera_vmd_selector(&discover_camera_vmds(dir), "auto")
+}
+
+fn resolve_camera_vmd_selector(files: &[PathBuf], selector: &str) -> Option<PathBuf> {
+    let raw = selector.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("none") {
         return None;
     }
-    files.sort();
-    if let Some(preferred) = files.iter().find(|path| {
-        path.file_stem()
-            .and_then(|value| value.to_str())
-            .map(|name| name.to_ascii_lowercase().contains("world_is_mine"))
-            .unwrap_or(false)
-    }) {
-        return Some(preferred.clone());
+    if raw.eq_ignore_ascii_case("auto") {
+        if let Some(preferred) = files.iter().find(|path| {
+            path.file_stem()
+                .and_then(|value| value.to_str())
+                .map(|name| name.to_ascii_lowercase().contains("world_is_mine"))
+                .unwrap_or(false)
+        }) {
+            return Some(preferred.clone());
+        }
+        return files.first().cloned();
     }
-    files.into_iter().next()
+
+    let as_path = PathBuf::from(raw);
+    if as_path.exists() && as_path.is_file() {
+        return Some(as_path);
+    }
+    let needle = raw.to_ascii_lowercase();
+    files
+        .iter()
+        .find(|path| {
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            file_name == needle || stem == needle || file_name.contains(&needle)
+        })
+        .cloned()
 }
 
 fn resolved_stage_dir(cli_stage_dir: &Path, runtime_cfg: &GasciiConfig) -> PathBuf {
@@ -2398,6 +2899,15 @@ fn resolved_stage_dir(cli_stage_dir: &Path, runtime_cfg: &GasciiConfig) -> PathB
         runtime_cfg.stage_dir.clone()
     } else {
         cli_stage_dir.to_path_buf()
+    }
+}
+
+fn resolved_camera_dir(cli_camera_dir: &Path, runtime_cfg: &GasciiConfig) -> PathBuf {
+    let cli_default = Path::new("assets/camera");
+    if cli_camera_dir == cli_default && runtime_cfg.camera_dir != cli_default {
+        runtime_cfg.camera_dir.clone()
+    } else {
+        cli_camera_dir.to_path_buf()
     }
 }
 
@@ -2887,28 +3397,67 @@ fn compute_animation_speed_factor(
     if clip <= f32::EPSILON || audio <= f32::EPSILON {
         return 1.0;
     }
-    let factor = clip / audio;
-    if (0.85..=1.15).contains(&factor) {
-        factor
-    } else {
-        eprintln!(
-            "warning: sync speed factor {:.4} out of range [0.85, 1.15], fallback to 1.0",
-            factor
-        );
-        1.0
-    }
+    (clip / audio).clamp(0.25, 4.0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_animation_time(
+    state: &mut ContinuousSyncState,
+    policy: SyncPolicy,
+    dt_wall: f32,
     elapsed_wall: f32,
     elapsed_audio: Option<f32>,
     speed_factor: f32,
     sync_offset_ms: i32,
+    hard_snap_ms: u32,
+    sync_kp: f32,
+    clip_duration: Option<f32>,
 ) -> f32 {
     let offset = (sync_offset_ms as f32) / 1000.0;
-    elapsed_audio
-        .map(|seconds| seconds * speed_factor + offset)
-        .unwrap_or(elapsed_wall + offset)
+    let hard_snap_sec = (hard_snap_ms as f32 / 1000.0).clamp(0.005, 5.0);
+    let kp = sync_kp.clamp(0.01, 1.0);
+    let dt = dt_wall.max(0.0);
+
+    let target_audio = elapsed_audio.map(|seconds| seconds * speed_factor + offset);
+
+    match policy {
+        SyncPolicy::Manual => {
+            if !state.initialized {
+                state.anim_time = elapsed_wall + offset;
+                state.initialized = true;
+            } else {
+                state.anim_time += dt;
+            }
+        }
+        SyncPolicy::Fixed => {
+            state.anim_time = target_audio.unwrap_or(elapsed_wall + offset);
+            state.initialized = true;
+        }
+        SyncPolicy::Continuous => {
+            if let Some(target) = target_audio {
+                if !state.initialized {
+                    state.anim_time = target;
+                    state.initialized = true;
+                } else {
+                    let err = target - state.anim_time;
+                    if err.abs() > hard_snap_sec {
+                        state.anim_time = target;
+                    } else {
+                        let rate = (speed_factor + kp * err).clamp(0.25, 4.0);
+                        state.anim_time += dt * rate;
+                    }
+                }
+            } else {
+                state.anim_time = elapsed_wall + offset;
+                state.initialized = true;
+            }
+        }
+    }
+
+    if let Some(duration) = clip_duration.filter(|value| *value > f32::EPSILON) {
+        state.anim_time = state.anim_time.rem_euclid(duration);
+    }
+    state.anim_time
 }
 
 fn load_camera_track(settings: &RuntimeCameraSettings) -> Option<LoadedCameraTrack> {
@@ -3021,7 +3570,7 @@ fn process_runtime_input(
     cinematic_mode: &mut CinematicCameraMode,
     reactive_gain: &mut f32,
     exposure_bias: &mut f32,
-    wasd_mode: CameraControlMode,
+    control_mode: &mut CameraControlMode,
     camera_look_speed: f32,
     freefly_state: &mut FreeFlyState,
 ) -> Result<RuntimeInputResult> {
@@ -3045,7 +3594,7 @@ fn process_runtime_input(
                     result.status_changed = true;
                 }
                 KeyCode::Char('w') | KeyCode::Char('W') => {
-                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                    if matches!(*control_mode, CameraControlMode::FreeFly) {
                         if *center_lock_enabled {
                             *center_lock_enabled = false;
                             result.center_lock_auto_disabled = true;
@@ -3056,7 +3605,7 @@ fn process_runtime_input(
                     }
                 }
                 KeyCode::Char('s') | KeyCode::Char('S') => {
-                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                    if matches!(*control_mode, CameraControlMode::FreeFly) {
                         if *center_lock_enabled {
                             *center_lock_enabled = false;
                             result.center_lock_auto_disabled = true;
@@ -3067,7 +3616,7 @@ fn process_runtime_input(
                     }
                 }
                 KeyCode::Char('a') | KeyCode::Char('A') => {
-                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                    if matches!(*control_mode, CameraControlMode::FreeFly) {
                         if *center_lock_enabled {
                             *center_lock_enabled = false;
                             result.center_lock_auto_disabled = true;
@@ -3078,7 +3627,7 @@ fn process_runtime_input(
                     }
                 }
                 KeyCode::Char('d') | KeyCode::Char('D') => {
-                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                    if matches!(*control_mode, CameraControlMode::FreeFly) {
                         if *center_lock_enabled {
                             *center_lock_enabled = false;
                             result.center_lock_auto_disabled = true;
@@ -3089,7 +3638,7 @@ fn process_runtime_input(
                     }
                 }
                 KeyCode::Char('q') => {
-                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                    if matches!(*control_mode, CameraControlMode::FreeFly) {
                         if *center_lock_enabled {
                             *center_lock_enabled = false;
                             result.center_lock_auto_disabled = true;
@@ -3104,7 +3653,7 @@ fn process_runtime_input(
                     }
                 }
                 KeyCode::Char('e') => {
-                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                    if matches!(*control_mode, CameraControlMode::FreeFly) {
                         if *center_lock_enabled {
                             *center_lock_enabled = false;
                             result.center_lock_auto_disabled = true;
@@ -3136,9 +3685,14 @@ fn process_runtime_input(
                     result.last_key = Some("-");
                 }
                 KeyCode::Char('f') | KeyCode::Char('F') => {
-                    *center_lock_enabled = !*center_lock_enabled;
+                    result.freefly_toggled = true;
                     result.status_changed = true;
                     result.last_key = Some("f");
+                }
+                KeyCode::Char('t') | KeyCode::Char('T') => {
+                    *center_lock_enabled = !*center_lock_enabled;
+                    result.status_changed = true;
+                    result.last_key = Some("t");
                 }
                 KeyCode::Char('x') | KeyCode::Char('X') => {
                     *orbit_speed = (*orbit_speed + 0.05).clamp(0.0, 3.0);
@@ -3162,7 +3716,7 @@ fn process_runtime_input(
                     result.zoom_changed = true;
                 }
                 KeyCode::Left => {
-                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                    if matches!(*control_mode, CameraControlMode::FreeFly) {
                         if *center_lock_enabled {
                             *center_lock_enabled = false;
                             result.center_lock_auto_disabled = true;
@@ -3177,7 +3731,7 @@ fn process_runtime_input(
                     }
                 }
                 KeyCode::Right => {
-                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                    if matches!(*control_mode, CameraControlMode::FreeFly) {
                         if *center_lock_enabled {
                             *center_lock_enabled = false;
                             result.center_lock_auto_disabled = true;
@@ -3192,7 +3746,7 @@ fn process_runtime_input(
                     }
                 }
                 KeyCode::Up => {
-                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                    if matches!(*control_mode, CameraControlMode::FreeFly) {
                         if *center_lock_enabled {
                             *center_lock_enabled = false;
                             result.center_lock_auto_disabled = true;
@@ -3208,7 +3762,7 @@ fn process_runtime_input(
                     }
                 }
                 KeyCode::Down => {
-                    if matches!(wasd_mode, CameraControlMode::FreeFly) {
+                    if matches!(*control_mode, CameraControlMode::FreeFly) {
                         if *center_lock_enabled {
                             *center_lock_enabled = false;
                             result.center_lock_auto_disabled = true;
@@ -3335,8 +3889,13 @@ fn process_runtime_input(
                 _ => {}
             },
             Event::Resize(width, height) => {
-                let (rw, rh, _) = cap_render_size(width, height);
-                frame.resize(rw.max(1), rh.max(1));
+                let cells = (width as u32).saturating_mul(height as u32);
+                if width == 0 || height == 0 || cells >= u16::MAX as u32 {
+                    result.terminal_size_unstable = true;
+                } else {
+                    let (rw, rh, _) = cap_render_size(width, height);
+                    frame.resize(rw.max(1), rh.max(1));
+                }
                 result.status_changed = true;
                 result.resized = true;
             }
@@ -3363,6 +3922,9 @@ fn bench(args: BenchArgs) -> Result<()> {
         near: args.near,
         far: args.far,
         mode,
+        output_mode: visual.output_mode,
+        graphics_protocol: visual.graphics_protocol,
+        recover_color_auto: visual.recover_color_auto,
         perf_profile: visual.perf_profile,
         detail_profile: visual.detail_profile,
         backend: visual.backend,
@@ -3401,6 +3963,9 @@ fn bench(args: BenchArgs) -> Result<()> {
         rim_power: args.rim_power,
         fog_strength: args.fog_strength,
         contrast_profile: visual.contrast_profile,
+        sync_policy: runtime_cfg.sync_policy,
+        sync_hard_snap_ms: runtime_cfg.sync_hard_snap_ms,
+        sync_kp: runtime_cfg.sync_kp,
         contrast_floor: 0.10,
         contrast_gamma: 0.90,
         fog_scale: 1.0,
@@ -3886,18 +4451,30 @@ mod tests {
     }
 
     #[test]
-    fn auto_speed_factor_clamps_outliers_to_one() {
+    fn auto_speed_factor_allows_large_duration_ratio() {
         let factor = compute_animation_speed_factor(
             Some(300.0),
             Some(120.0),
             SyncSpeedMode::AutoDurationFit,
         );
-        assert!((factor - 1.0).abs() < 1e-6);
+        assert!((factor - 2.5).abs() < 1e-6);
     }
 
     #[test]
     fn animation_time_applies_sync_offset_with_audio_clock() {
-        let time = compute_animation_time(5.0, Some(3.0), 1.05, 120);
+        let mut state = ContinuousSyncState::default();
+        let time = compute_animation_time(
+            &mut state,
+            SyncPolicy::Fixed,
+            0.016,
+            5.0,
+            Some(3.0),
+            1.05,
+            120,
+            120,
+            0.15,
+            None,
+        );
         assert!((time - 3.27).abs() < 1e-6);
     }
 

@@ -14,8 +14,11 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
     renderer::FrameBuffers,
-    runtime::graphics_proto::write_graphics_frame,
-    scene::{AnsiQuantization, GraphicsProtocol},
+    runtime::graphics_proto::{GraphicsPresentOptions, write_graphics_frame},
+    scene::{
+        AnsiQuantization, GraphicsProtocol, KittyCompression, KittyPipelineMode, KittyTransport,
+        RecoverStrategy,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,8 +187,28 @@ impl TerminalSession {
         &mut self,
         frame: &FrameBuffers,
         protocol: GraphicsProtocol,
+        transport: KittyTransport,
+        compression: KittyCompression,
+        pipeline_mode: KittyPipelineMode,
+        recover_strategy: RecoverStrategy,
+        scale: f32,
+        display_cells: (u16, u16),
+        force_reupload: bool,
     ) -> Result<()> {
-        write_graphics_frame(&mut self.stdout, frame, protocol)?;
+        write_graphics_frame(
+            &mut self.stdout,
+            frame,
+            protocol,
+            GraphicsPresentOptions {
+                transport,
+                compression,
+                pipeline_mode,
+                recover_strategy,
+                scale,
+                display_cells: Some(display_cells),
+                force_reupload,
+            },
+        )?;
         // Force a full repaint if/when we fall back to text mode.
         self.presenter.force_full_repaint = true;
         Ok(())

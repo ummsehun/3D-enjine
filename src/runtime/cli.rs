@@ -6,8 +6,9 @@ use crate::scene::{
     AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
     CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
     ClarityProfile, ColorMode, ContrastProfile, DEFAULT_CHARSET, DetailProfile, GraphicsProtocol,
-    PerfProfile, RenderBackend, RenderMode, RenderOutputMode, SyncPolicy, SyncSpeedMode,
-    TextureSamplingMode, ThemeStyle,
+    KittyCompression, KittyInternalResPreset, KittyPipelineMode, KittyTransport, PerfProfile,
+    RecoverStrategy, RenderBackend, RenderMode, RenderOutputMode, StageRole, SyncPolicy,
+    SyncSpeedMode, TextureSamplerMode, TextureSamplingMode, TextureVOrigin, ThemeStyle,
 };
 
 #[derive(Debug, Parser)]
@@ -76,6 +77,36 @@ pub struct StartArgs {
     #[arg(long, value_enum)]
     pub output_mode: Option<OutputModeArg>,
     #[arg(long, value_enum)]
+    pub kitty_transport: Option<KittyTransportArg>,
+    #[arg(long, value_enum)]
+    pub kitty_compression: Option<KittyCompressionArg>,
+    #[arg(long, value_enum)]
+    pub kitty_internal_res: Option<KittyInternalResArg>,
+    #[arg(long, value_enum)]
+    pub kitty_pipeline: Option<KittyPipelineArg>,
+    #[arg(long, value_enum)]
+    pub recover_strategy: Option<RecoverStrategyArg>,
+    #[arg(long)]
+    pub kitty_scale: Option<f32>,
+    #[arg(long)]
+    pub hq_target_fps: Option<u32>,
+    #[arg(long)]
+    pub subject_target_height: Option<f32>,
+    #[arg(long)]
+    pub subject_target_width: Option<f32>,
+    #[arg(long, value_enum)]
+    pub quality_auto_distance: Option<ToggleArg>,
+    #[arg(long)]
+    pub texture_mip_bias: Option<f32>,
+    #[arg(long, value_enum)]
+    pub stage_sub_only: Option<ToggleArg>,
+    #[arg(long, value_enum)]
+    pub subject_exposure_only: Option<ToggleArg>,
+    #[arg(long, value_enum)]
+    pub stage_role: Option<StageRoleArg>,
+    #[arg(long)]
+    pub stage_luma_cap: Option<f32>,
+    #[arg(long, value_enum)]
     pub recover_color: Option<RecoverColorArg>,
     #[arg(long, value_enum)]
     pub graphics_protocol: Option<GraphicsProtocolArg>,
@@ -119,6 +150,10 @@ pub struct StartArgs {
     pub material_color: Option<ToggleArg>,
     #[arg(long, value_enum)]
     pub texture_sampling: Option<TextureSamplingArg>,
+    #[arg(long, value_enum)]
+    pub texture_v_origin: Option<TextureVOriginArg>,
+    #[arg(long, value_enum)]
+    pub texture_sampler: Option<TextureSamplerModeArg>,
     #[arg(long)]
     pub stage_level: Option<u8>,
     #[arg(long)]
@@ -220,6 +255,36 @@ pub struct RunArgs {
     #[arg(long, value_enum)]
     pub output_mode: Option<OutputModeArg>,
     #[arg(long, value_enum)]
+    pub kitty_transport: Option<KittyTransportArg>,
+    #[arg(long, value_enum)]
+    pub kitty_compression: Option<KittyCompressionArg>,
+    #[arg(long, value_enum)]
+    pub kitty_internal_res: Option<KittyInternalResArg>,
+    #[arg(long, value_enum)]
+    pub kitty_pipeline: Option<KittyPipelineArg>,
+    #[arg(long, value_enum)]
+    pub recover_strategy: Option<RecoverStrategyArg>,
+    #[arg(long)]
+    pub kitty_scale: Option<f32>,
+    #[arg(long)]
+    pub hq_target_fps: Option<u32>,
+    #[arg(long)]
+    pub subject_target_height: Option<f32>,
+    #[arg(long)]
+    pub subject_target_width: Option<f32>,
+    #[arg(long, value_enum)]
+    pub quality_auto_distance: Option<ToggleArg>,
+    #[arg(long)]
+    pub texture_mip_bias: Option<f32>,
+    #[arg(long, value_enum)]
+    pub stage_sub_only: Option<ToggleArg>,
+    #[arg(long, value_enum)]
+    pub subject_exposure_only: Option<ToggleArg>,
+    #[arg(long, value_enum)]
+    pub stage_role: Option<StageRoleArg>,
+    #[arg(long)]
+    pub stage_luma_cap: Option<f32>,
+    #[arg(long, value_enum)]
     pub recover_color: Option<RecoverColorArg>,
     #[arg(long, value_enum)]
     pub graphics_protocol: Option<GraphicsProtocolArg>,
@@ -263,6 +328,10 @@ pub struct RunArgs {
     pub material_color: Option<ToggleArg>,
     #[arg(long, value_enum)]
     pub texture_sampling: Option<TextureSamplingArg>,
+    #[arg(long, value_enum)]
+    pub texture_v_origin: Option<TextureVOriginArg>,
+    #[arg(long, value_enum)]
+    pub texture_sampler: Option<TextureSamplerModeArg>,
     #[arg(long)]
     pub stage_level: Option<u8>,
     #[arg(long)]
@@ -340,6 +409,36 @@ pub struct BenchArgs {
     #[arg(long, value_enum)]
     pub output_mode: Option<OutputModeArg>,
     #[arg(long, value_enum)]
+    pub kitty_transport: Option<KittyTransportArg>,
+    #[arg(long, value_enum)]
+    pub kitty_compression: Option<KittyCompressionArg>,
+    #[arg(long, value_enum)]
+    pub kitty_internal_res: Option<KittyInternalResArg>,
+    #[arg(long, value_enum)]
+    pub kitty_pipeline: Option<KittyPipelineArg>,
+    #[arg(long, value_enum)]
+    pub recover_strategy: Option<RecoverStrategyArg>,
+    #[arg(long)]
+    pub kitty_scale: Option<f32>,
+    #[arg(long)]
+    pub hq_target_fps: Option<u32>,
+    #[arg(long)]
+    pub subject_target_height: Option<f32>,
+    #[arg(long)]
+    pub subject_target_width: Option<f32>,
+    #[arg(long, value_enum)]
+    pub quality_auto_distance: Option<ToggleArg>,
+    #[arg(long)]
+    pub texture_mip_bias: Option<f32>,
+    #[arg(long, value_enum)]
+    pub stage_sub_only: Option<ToggleArg>,
+    #[arg(long, value_enum)]
+    pub subject_exposure_only: Option<ToggleArg>,
+    #[arg(long, value_enum)]
+    pub stage_role: Option<StageRoleArg>,
+    #[arg(long)]
+    pub stage_luma_cap: Option<f32>,
+    #[arg(long, value_enum)]
     pub graphics_protocol: Option<GraphicsProtocolArg>,
     #[arg(long, value_enum)]
     pub color_mode: Option<ColorModeArg>,
@@ -375,6 +474,10 @@ pub struct BenchArgs {
     pub material_color: Option<ToggleArg>,
     #[arg(long, value_enum)]
     pub texture_sampling: Option<TextureSamplingArg>,
+    #[arg(long, value_enum)]
+    pub texture_v_origin: Option<TextureVOriginArg>,
+    #[arg(long, value_enum)]
+    pub texture_sampler: Option<TextureSamplerModeArg>,
     #[arg(long)]
     pub stage_level: Option<u8>,
     #[arg(long)]
@@ -444,6 +547,9 @@ pub struct PreviewArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct PreprocessArgs {
+    /// Preprocess preset.
+    #[arg(long, value_enum, default_value_t = PreprocessPresetArg::Default)]
+    pub preset: PreprocessPresetArg,
     /// Input GLB file.
     #[arg(long)]
     pub glb: PathBuf,
@@ -463,6 +569,14 @@ pub struct InspectArgs {
     /// Path to .glb or .gltf file.
     #[arg(long)]
     pub glb: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum PreprocessPresetArg {
+    #[value(name = "default")]
+    Default,
+    #[value(name = "web-parity")]
+    WebParity,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -515,7 +629,51 @@ pub enum SyncPolicyArg {
 pub enum OutputModeArg {
     Text,
     Hybrid,
-    Graphics,
+    #[value(name = "kitty-hq", alias = "graphics")]
+    KittyHq,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum KittyTransportArg {
+    Shm,
+    Direct,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum KittyCompressionArg {
+    None,
+    Zlib,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum KittyInternalResArg {
+    #[value(name = "640x360")]
+    R640x360,
+    #[value(name = "854x480")]
+    R854x480,
+    #[value(name = "1280x720")]
+    R1280x720,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum KittyPipelineArg {
+    #[value(name = "real")]
+    RealPixel,
+    #[value(name = "glyph")]
+    GlyphCompat,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum RecoverStrategyArg {
+    Hard,
+    Soft,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum StageRoleArg {
+    Sub,
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -638,6 +796,18 @@ pub enum TextureSamplingArg {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum TextureVOriginArg {
+    Gltf,
+    Legacy,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum TextureSamplerModeArg {
+    Gltf,
+    Override,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum BackendArg {
     Cpu,
     #[value(name = "gpu", alias = "gpu-preview")]
@@ -701,7 +871,63 @@ impl From<OutputModeArg> for RenderOutputMode {
         match value {
             OutputModeArg::Text => RenderOutputMode::Text,
             OutputModeArg::Hybrid => RenderOutputMode::Hybrid,
-            OutputModeArg::Graphics => RenderOutputMode::Graphics,
+            OutputModeArg::KittyHq => RenderOutputMode::KittyHq,
+        }
+    }
+}
+
+impl From<KittyTransportArg> for KittyTransport {
+    fn from(value: KittyTransportArg) -> Self {
+        match value {
+            KittyTransportArg::Shm => KittyTransport::Shm,
+            KittyTransportArg::Direct => KittyTransport::Direct,
+        }
+    }
+}
+
+impl From<KittyCompressionArg> for KittyCompression {
+    fn from(value: KittyCompressionArg) -> Self {
+        match value {
+            KittyCompressionArg::None => KittyCompression::None,
+            KittyCompressionArg::Zlib => KittyCompression::Zlib,
+        }
+    }
+}
+
+impl From<KittyInternalResArg> for KittyInternalResPreset {
+    fn from(value: KittyInternalResArg) -> Self {
+        match value {
+            KittyInternalResArg::R640x360 => KittyInternalResPreset::R640x360,
+            KittyInternalResArg::R854x480 => KittyInternalResPreset::R854x480,
+            KittyInternalResArg::R1280x720 => KittyInternalResPreset::R1280x720,
+        }
+    }
+}
+
+impl From<StageRoleArg> for StageRole {
+    fn from(value: StageRoleArg) -> Self {
+        match value {
+            StageRoleArg::Sub => StageRole::Sub,
+            StageRoleArg::Off => StageRole::Off,
+        }
+    }
+}
+
+impl From<KittyPipelineArg> for KittyPipelineMode {
+    fn from(value: KittyPipelineArg) -> Self {
+        match value {
+            KittyPipelineArg::RealPixel => KittyPipelineMode::RealPixel,
+            KittyPipelineArg::GlyphCompat => KittyPipelineMode::GlyphCompat,
+        }
+    }
+}
+
+impl From<RecoverStrategyArg> for RecoverStrategy {
+    fn from(value: RecoverStrategyArg) -> Self {
+        match value {
+            RecoverStrategyArg::Hard => RecoverStrategy::Hard,
+            RecoverStrategyArg::Soft => RecoverStrategy::Soft,
+            RecoverStrategyArg::Off => RecoverStrategy::Off,
         }
     }
 }
@@ -846,6 +1072,24 @@ impl From<TextureSamplingArg> for TextureSamplingMode {
         match value {
             TextureSamplingArg::Nearest => TextureSamplingMode::Nearest,
             TextureSamplingArg::Bilinear => TextureSamplingMode::Bilinear,
+        }
+    }
+}
+
+impl From<TextureVOriginArg> for TextureVOrigin {
+    fn from(value: TextureVOriginArg) -> Self {
+        match value {
+            TextureVOriginArg::Gltf => TextureVOrigin::Gltf,
+            TextureVOriginArg::Legacy => TextureVOrigin::Legacy,
+        }
+    }
+}
+
+impl From<TextureSamplerModeArg> for TextureSamplerMode {
+    fn from(value: TextureSamplerModeArg) -> Self {
+        match value {
+            TextureSamplerModeArg::Gltf => TextureSamplerMode::Gltf,
+            TextureSamplerModeArg::Override => TextureSamplerMode::Override,
         }
     }
 }

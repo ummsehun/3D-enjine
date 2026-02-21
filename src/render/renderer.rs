@@ -4,8 +4,9 @@ use std::fmt::Write as _;
 use crate::math::{depth_less, perspective_matrix};
 use crate::scene::{
     AnsiQuantization, BrailleProfile, ClarityProfile, ColorMode, ContrastProfile, DEFAULT_CHARSET,
-    DetailProfile, MaterialAlphaMode, MeshCpu, MeshLayer, RenderConfig, RenderMode, SceneCpu,
-    TextureSamplingMode, ThemeStyle, UvTransform2D,
+    DetailProfile, KittyPipelineMode, MaterialAlphaMode, MeshCpu, MeshLayer, RenderConfig,
+    RenderMode, SceneCpu, StageRole, TextureColorSpace, TextureFilterMode, TextureSamplerMode,
+    TextureSamplingMode, TextureVOrigin, TextureWrapMode, ThemeStyle, UvTransform2D,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -33,6 +34,28 @@ pub struct FrameBuffers {
     pub depth: Vec<f32>,
     pub fg_rgb: Vec<[u8; 3]>,
     pub has_color: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PixelFrame {
+    pub width_px: u32,
+    pub height_px: u32,
+    pub rgba8: Vec<u8>,
+    pub depth: Vec<f32>,
+    pub subject_mask: Vec<u8>,
+}
+
+impl PixelFrame {
+    pub fn new(width_px: u32, height_px: u32) -> Self {
+        let size = (width_px as usize).saturating_mul(height_px as usize);
+        Self {
+            width_px,
+            height_px,
+            rgba8: vec![0; size.saturating_mul(4)],
+            depth: vec![f32::INFINITY; size],
+            subject_mask: vec![0; size],
+        }
+    }
 }
 
 impl FrameBuffers {
@@ -141,6 +164,94 @@ fn quantize_rgb(rgb: [u8; 3], quantization: AnsiQuantization) -> [u8; 3] {
     match quantization {
         AnsiQuantization::Q216 => quantize_rgb_q216(rgb),
         AnsiQuantization::Off => rgb,
+    }
+}
+
+pub fn pixel_frame_from_cells(
+    frame: &FrameBuffers,
+    cell_px_w: u32,
+    cell_px_h: u32,
+    mode: KittyPipelineMode,
+    background_rgb: [u8; 3],
+) -> PixelFrame {
+    if frame.glyphs.is_empty() {
+        return PixelFrame::new(1, 1);
+    }
+    let cell_px_w = cell_px_w.max(1);
+    let cell_px_h = cell_px_h.max(1);
+    let width_px = u32::from(frame.width).max(1).saturating_mul(cell_px_w);
+    let height_px = u32::from(frame.height).max(1).saturating_mul(cell_px_h);
+    let mut out = PixelFrame::new(width_px, height_px);
+    let cols = usize::from(frame.width.max(1));
+    for cy in 0..u32::from(frame.height.max(1)) {
+        for cx in 0..u32::from(frame.width.max(1)) {
+            let cell_idx = (cy as usize)
+                .saturating_mul(cols)
+                .saturating_add(cx as usize)
+                .min(frame.glyphs.len().saturating_sub(1));
+            let glyph = frame.glyphs[cell_idx];
+            let rgb = frame
+                .fg_rgb
+                .get(cell_idx)
+                .copied()
+                .unwrap_or([255, 255, 255]);
+            let depth = frame.depth.get(cell_idx).copied().unwrap_or(f32::INFINITY);
+            let visible = depth.is_finite();
+            let coverage = match mode {
+                KittyPipelineMode::RealPixel => {
+                    if visible {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                KittyPipelineMode::GlyphCompat => glyph_coverage(glyph),
+            };
+            let lit = (coverage.clamp(0.0, 1.0) * (cell_px_w * cell_px_h) as f32).round() as u32;
+            let mut wrote = 0_u32;
+            for py in 0..cell_px_h {
+                for px in 0..cell_px_w {
+                    let x = cx * cell_px_w + px;
+                    let y = cy * cell_px_h + py;
+                    let idx = (y as usize)
+                        .saturating_mul(width_px as usize)
+                        .saturating_add(x as usize);
+                    let rgba_idx = idx.saturating_mul(4);
+                    let is_fg = wrote < lit;
+                    let color = if is_fg { rgb } else { background_rgb };
+                    out.rgba8[rgba_idx] = color[0];
+                    out.rgba8[rgba_idx + 1] = color[1];
+                    out.rgba8[rgba_idx + 2] = color[2];
+                    out.rgba8[rgba_idx + 3] = 255;
+                    out.depth[idx] = depth;
+                    out.subject_mask[idx] = if visible && is_fg { 255 } else { 0 };
+                    wrote += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn glyph_coverage(glyph: char) -> f32 {
+    if glyph == ' ' {
+        return 0.0;
+    }
+    let code = glyph as u32;
+    if (0x2800..=0x28ff).contains(&code) {
+        let mask = (code - 0x2800) as u8;
+        return (mask.count_ones() as f32 / 8.0).clamp(0.20, 1.0);
+    }
+    match glyph {
+        '.' | '\'' | '`' => 0.35,
+        ':' | ';' => 0.45,
+        '-' | '_' => 0.55,
+        '=' | '+' => 0.70,
+        '*' | 'x' | 'X' => 0.80,
+        '#' => 0.90,
+        '%' => 0.95,
+        '@' => 1.0,
+        _ => 0.82,
     }
 }
 
@@ -321,7 +432,15 @@ fn fill_background_ascii(frame: &mut FrameBuffers, config: &RenderConfig, palett
     };
     let detail = background_detail_level(config);
     let stage = stage_params(config);
-    let bg_attenuation = (1.0 - config.bg_suppression.clamp(0.0, 1.0) * 0.75).clamp(0.05, 1.0);
+    let mut bg_attenuation = (1.0 - config.bg_suppression.clamp(0.0, 1.0) * 0.75).clamp(0.05, 1.0);
+    let stage_cap = if matches!(config.stage_role, StageRole::Off) {
+        0.0
+    } else {
+        config.stage_luma_cap.clamp(0.0, 1.0)
+    };
+    if matches!(config.stage_role, StageRole::Off) {
+        bg_attenuation *= 0.55;
+    }
     let pulse_scale = if matches!(config.color_mode, ColorMode::Ansi) {
         1.0
     } else if config.stage_reactive {
@@ -343,14 +462,18 @@ fn fill_background_ascii(frame: &mut FrameBuffers, config: &RenderConfig, palett
                 1 => ((0.015 + horizon * 0.05 + vignette * 0.03) * pulse_scale).clamp(0.0, 0.16),
                 _ => (0.010 + horizon * 0.025).clamp(0.0, 0.11),
             };
-            intensity *= stage.bg_luma_scale * bg_attenuation;
-            if stage.floor_grid_density > 0
+            intensity *= stage.bg_luma_scale * bg_attenuation * stage_cap;
+            if stage_cap > 0.01
+                && stage.floor_grid_density > 0
                 && y > (height * 2) / 3
                 && (x % stage.floor_grid_density == 0)
             {
                 intensity += 0.05 * stage.backlight_strength;
             }
-            if stage.particle_density > 0.0 && hash01(x, y, 17) < stage.particle_density {
+            if stage_cap > 0.01
+                && stage.particle_density > 0.0
+                && hash01(x, y, 17) < stage.particle_density
+            {
                 intensity += 0.07 * stage.backlight_strength;
             }
             let index = ((intensity * (BACKGROUND_ASCII.len() as f32 - 1.0)).round() as usize)
@@ -396,7 +519,15 @@ fn fill_background_braille(frame: &mut FrameBuffers, config: &RenderConfig, pale
     };
     let detail = background_detail_level(config);
     let stage = stage_params(config);
-    let bg_attenuation = (1.0 - config.bg_suppression.clamp(0.0, 1.0) * 0.75).clamp(0.05, 1.0);
+    let mut bg_attenuation = (1.0 - config.bg_suppression.clamp(0.0, 1.0) * 0.75).clamp(0.05, 1.0);
+    let stage_cap = if matches!(config.stage_role, StageRole::Off) {
+        0.0
+    } else {
+        config.stage_luma_cap.clamp(0.0, 1.0)
+    };
+    if matches!(config.stage_role, StageRole::Off) {
+        bg_attenuation *= 0.55;
+    }
     let pulse_scale = if matches!(config.color_mode, ColorMode::Ansi) {
         1.0
     } else if config.stage_reactive {
@@ -420,14 +551,18 @@ fn fill_background_braille(frame: &mut FrameBuffers, config: &RenderConfig, pale
                 1 => ((0.011 + horizon * 0.035) * pulse_scale).clamp(0.0, 0.12),
                 _ => (0.008 + horizon * 0.015).clamp(0.0, 0.08),
             };
-            base *= stage.bg_luma_scale * bg_attenuation;
-            if stage.floor_grid_density > 0
+            base *= stage.bg_luma_scale * bg_attenuation * stage_cap;
+            if stage_cap > 0.01
+                && stage.floor_grid_density > 0
                 && y > (height * 2) / 3
                 && (x % stage.floor_grid_density == 0)
             {
                 base += 0.04 * stage.backlight_strength;
             }
-            if stage.particle_density > 0.0 && hash01(x, y, 29) < stage.particle_density {
+            if stage_cap > 0.01
+                && stage.particle_density > 0.0
+                && hash01(x, y, 29) < stage.particle_density
+            {
                 base += 0.05 * stage.backlight_strength;
             }
             let index = ((base * (BACKGROUND_BRAILLE.len() as f32 - 1.0)).round() as usize)
@@ -511,6 +646,7 @@ fn sample_material(
     material_index: Option<usize>,
     uv0: Vec2,
     uv1: Vec2,
+    depth: f32,
     vertex_color: [f32; 4],
     config: &RenderConfig,
 ) -> MaterialSample {
@@ -546,10 +682,39 @@ fn sample_material(
                 if let Some(transform) = material.base_color_uv_transform {
                     selected_uv = apply_uv_transform(selected_uv, transform);
                 }
-                let sampled = sample_texture_rgba(texture, selected_uv, config.texture_sampling);
-                color[0] *= srgb_to_linear(sampled[0]);
-                color[1] *= srgb_to_linear(sampled[1]);
-                color[2] *= srgb_to_linear(sampled[2]);
+                let sampling_mode = match config.texture_sampler {
+                    TextureSamplerMode::Override => config.texture_sampling,
+                    TextureSamplerMode::Gltf => {
+                        if matches!(material.base_color_mag_filter, TextureFilterMode::Nearest)
+                            || matches!(material.base_color_min_filter, TextureFilterMode::Nearest)
+                        {
+                            TextureSamplingMode::Nearest
+                        } else {
+                            TextureSamplingMode::Bilinear
+                        }
+                    }
+                };
+                let mip_level = select_mip_level(texture, depth, config.texture_mip_bias);
+                let sampled = sample_texture_rgba(
+                    texture,
+                    selected_uv,
+                    sampling_mode,
+                    config.texture_v_origin,
+                    material.base_color_wrap_s,
+                    material.base_color_wrap_t,
+                    mip_level,
+                );
+                let sample_rgb = match texture.color_space {
+                    TextureColorSpace::Srgb => [
+                        srgb_to_linear(sampled[0]),
+                        srgb_to_linear(sampled[1]),
+                        srgb_to_linear(sampled[2]),
+                    ],
+                    TextureColorSpace::Linear => [sampled[0], sampled[1], sampled[2]],
+                };
+                color[0] *= sample_rgb[0];
+                color[1] *= sample_rgb[1];
+                color[2] *= sample_rgb[2];
                 color[3] *= sampled[3];
             }
         }
@@ -578,33 +743,57 @@ fn apply_uv_transform(uv: Vec2, transform: UvTransform2D) -> Vec2 {
 
 fn sample_texture_rgba(
     texture: &crate::scene::TextureCpu,
-    uv0: Vec2,
+    uv: Vec2,
     mode: TextureSamplingMode,
+    v_origin: TextureVOrigin,
+    wrap_s: TextureWrapMode,
+    wrap_t: TextureWrapMode,
+    mip_level: usize,
 ) -> [f32; 4] {
-    let wrap_u = uv0.x - uv0.x.floor();
-    let wrap_v = uv0.y - uv0.y.floor();
+    let (level_width, level_height, level_data) = texture_level(texture, mip_level);
+    let wrap_u = wrap_uv(uv.x, wrap_s);
+    let raw_v = match v_origin {
+        TextureVOrigin::Gltf => uv.y,
+        TextureVOrigin::Legacy => 1.0 - uv.y,
+    };
+    let wrap_v = wrap_uv(raw_v, wrap_t);
     match mode {
-        TextureSamplingMode::Nearest => sample_texture_nearest(texture, wrap_u, wrap_v),
-        TextureSamplingMode::Bilinear => sample_texture_bilinear(texture, wrap_u, wrap_v),
+        TextureSamplingMode::Nearest => {
+            sample_texture_nearest(level_width, level_height, level_data, wrap_u, wrap_v)
+        }
+        TextureSamplingMode::Bilinear => {
+            sample_texture_bilinear(level_width, level_height, level_data, wrap_u, wrap_v)
+        }
     }
 }
 
-fn sample_texture_nearest(texture: &crate::scene::TextureCpu, u: f32, v: f32) -> [f32; 4] {
-    if texture.width == 0 || texture.height == 0 {
+fn sample_texture_nearest(
+    width: u32,
+    height: u32,
+    rgba8: &[u8],
+    u: f32,
+    v: f32,
+) -> [f32; 4] {
+    if width == 0 || height == 0 {
         return [1.0, 1.0, 1.0, 1.0];
     }
-    let x = ((u * texture.width as f32).floor() as i32).rem_euclid(texture.width as i32) as u32;
-    let y = (((1.0 - v) * texture.height as f32).floor() as i32).rem_euclid(texture.height as i32)
-        as u32;
-    sample_texture_texel(texture, x, y)
+    let x = ((u * width as f32).floor() as i32).rem_euclid(width as i32) as u32;
+    let y = ((v * height as f32).floor() as i32).rem_euclid(height as i32) as u32;
+    sample_texture_texel(width, height, rgba8, x, y)
 }
 
-fn sample_texture_bilinear(texture: &crate::scene::TextureCpu, u: f32, v: f32) -> [f32; 4] {
-    if texture.width == 0 || texture.height == 0 {
+fn sample_texture_bilinear(
+    width: u32,
+    height: u32,
+    rgba8: &[u8],
+    u: f32,
+    v: f32,
+) -> [f32; 4] {
+    if width == 0 || height == 0 {
         return [1.0, 1.0, 1.0, 1.0];
     }
-    let fx = u * texture.width as f32 - 0.5;
-    let fy = (1.0 - v) * texture.height as f32 - 0.5;
+    let fx = u * width as f32 - 0.5;
+    let fy = v * height as f32 - 0.5;
     let x0 = fx.floor() as i32;
     let y0 = fy.floor() as i32;
     let x1 = x0 + 1;
@@ -612,24 +801,32 @@ fn sample_texture_bilinear(texture: &crate::scene::TextureCpu, u: f32, v: f32) -
     let tx = fx - x0 as f32;
     let ty = fy - y0 as f32;
     let c00 = sample_texture_texel(
-        texture,
-        x0.rem_euclid(texture.width as i32) as u32,
-        y0.rem_euclid(texture.height as i32) as u32,
+        width,
+        height,
+        rgba8,
+        x0.rem_euclid(width as i32) as u32,
+        y0.rem_euclid(height as i32) as u32,
     );
     let c10 = sample_texture_texel(
-        texture,
-        x1.rem_euclid(texture.width as i32) as u32,
-        y0.rem_euclid(texture.height as i32) as u32,
+        width,
+        height,
+        rgba8,
+        x1.rem_euclid(width as i32) as u32,
+        y0.rem_euclid(height as i32) as u32,
     );
     let c01 = sample_texture_texel(
-        texture,
-        x0.rem_euclid(texture.width as i32) as u32,
-        y1.rem_euclid(texture.height as i32) as u32,
+        width,
+        height,
+        rgba8,
+        x0.rem_euclid(width as i32) as u32,
+        y1.rem_euclid(height as i32) as u32,
     );
     let c11 = sample_texture_texel(
-        texture,
-        x1.rem_euclid(texture.width as i32) as u32,
-        y1.rem_euclid(texture.height as i32) as u32,
+        width,
+        height,
+        rgba8,
+        x1.rem_euclid(width as i32) as u32,
+        y1.rem_euclid(height as i32) as u32,
     );
     [
         bilerp(c00[0], c10[0], c01[0], c11[0], tx, ty),
@@ -639,20 +836,55 @@ fn sample_texture_bilinear(texture: &crate::scene::TextureCpu, u: f32, v: f32) -
     ]
 }
 
-fn sample_texture_texel(texture: &crate::scene::TextureCpu, x: u32, y: u32) -> [f32; 4] {
+fn sample_texture_texel(width: u32, height: u32, rgba8: &[u8], x: u32, y: u32) -> [f32; 4] {
     let idx = (y as usize)
-        .saturating_mul(texture.width as usize)
+        .saturating_mul(width as usize)
         .saturating_add(x as usize)
         .saturating_mul(4);
-    if idx + 3 >= texture.rgba8.len() {
+    if width == 0 || height == 0 || idx + 3 >= rgba8.len() {
         return [1.0, 1.0, 1.0, 1.0];
     }
     [
-        texture.rgba8[idx] as f32 / 255.0,
-        texture.rgba8[idx + 1] as f32 / 255.0,
-        texture.rgba8[idx + 2] as f32 / 255.0,
-        texture.rgba8[idx + 3] as f32 / 255.0,
+        rgba8[idx] as f32 / 255.0,
+        rgba8[idx + 1] as f32 / 255.0,
+        rgba8[idx + 2] as f32 / 255.0,
+        rgba8[idx + 3] as f32 / 255.0,
     ]
+}
+
+fn texture_level(texture: &crate::scene::TextureCpu, mip_level: usize) -> (u32, u32, &[u8]) {
+    if mip_level == 0 {
+        return (texture.width, texture.height, texture.rgba8.as_slice());
+    }
+    if let Some(level) = texture.mip_levels.get(mip_level.saturating_sub(1)) {
+        return (level.width, level.height, level.rgba8.as_slice());
+    }
+    if let Some(last) = texture.mip_levels.last() {
+        return (last.width, last.height, last.rgba8.as_slice());
+    }
+    (texture.width, texture.height, texture.rgba8.as_slice())
+}
+
+fn select_mip_level(texture: &crate::scene::TextureCpu, depth: f32, mip_bias: f32) -> usize {
+    let max_level = texture.mip_levels.len();
+    if max_level == 0 {
+        return 0;
+    }
+    let depth_term = depth.clamp(0.0, 1.0) * 6.0;
+    let lod = (depth_term + mip_bias).clamp(0.0, max_level as f32);
+    lod.floor() as usize
+}
+
+fn wrap_uv(value: f32, mode: TextureWrapMode) -> f32 {
+    match mode {
+        TextureWrapMode::Repeat => value - value.floor(),
+        TextureWrapMode::MirroredRepeat => {
+            let whole = value.floor() as i32;
+            let frac = value - value.floor();
+            if whole & 1 == 0 { frac } else { 1.0 - frac }
+        }
+        TextureWrapMode::ClampToEdge => value.clamp(0.0, 1.0 - 1.0e-6),
+    }
 }
 
 fn bilerp(c00: f32, c10: f32, c01: f32, c11: f32, tx: f32, ty: f32) -> f32 {
@@ -977,6 +1209,11 @@ fn render_frame_ascii(
     let exposure = scratch.exposure * exposure_bias_multiplier(config.exposure_bias);
     for pass in RasterPass::all() {
         for (instance_index, instance) in scene.mesh_instances.iter().enumerate() {
+            if matches!(instance.layer, MeshLayer::Stage)
+                && matches!(config.stage_role, StageRole::Off)
+            {
+                continue;
+            }
             let Some(mesh) = scene.meshes.get(instance.mesh_index) else {
                 continue;
             };
@@ -1107,6 +1344,11 @@ fn render_frame_braille(
     );
     for pass in RasterPass::all() {
         for (instance_index, instance) in scene.mesh_instances.iter().enumerate() {
+            if matches!(instance.layer, MeshLayer::Stage)
+                && matches!(config.stage_role, StageRole::Off)
+            {
+                continue;
+            }
             let Some(mesh) = scene.meshes.get(instance.mesh_index) else {
                 continue;
             };
@@ -1354,12 +1596,21 @@ fn rasterize_mesh(
     let width = i32::from(frame.width);
     let height = i32::from(frame.height);
     let width_usize = usize::from(frame.width);
-    let triangle_stride = if matches!(pass, RasterPass::Blend) && is_subject_layer {
-        (config.triangle_stride / 2).max(1)
+    let base_stride = config.triangle_stride.max(1);
+    let triangle_stride = if is_subject_layer {
+        if matches!(pass, RasterPass::Blend) {
+            (base_stride / 2).max(1)
+        } else {
+            base_stride.min(2)
+        }
     } else {
-        config.triangle_stride.max(1)
+        base_stride.saturating_mul(6).clamp(2, 32)
     };
-    let min_triangle_area_px2 = config.min_triangle_area_px2.max(0.0);
+    let min_triangle_area_px2 = if is_subject_layer {
+        (config.min_triangle_area_px2 * 0.35).max(0.0)
+    } else {
+        (config.min_triangle_area_px2.max(0.2) * 2.2).max(0.2)
+    };
     if width <= 0 || height <= 0 {
         return;
     }
@@ -1367,8 +1618,18 @@ fn rasterize_mesh(
     if !pass.matches(material_props.alpha_mode) {
         return;
     }
+    if !is_subject_layer && matches!(pass, RasterPass::Blend) {
+        // Stage blend pass is expensive and tends to shimmer in terminal rasterization.
+        return;
+    }
     stats.triangles_total += mesh.indices.len();
     let write_depth = !matches!(pass, RasterPass::Blend);
+    let layer_luma_scale = if is_subject_layer {
+        1.0
+    } else {
+        ((1.0 - config.bg_suppression.clamp(0.0, 1.0) * 0.88).clamp(0.12, 1.0))
+            .min(config.stage_luma_cap.clamp(0.0, 1.0))
+    };
 
     let mut triangle_order = Vec::with_capacity(mesh.indices.len());
     if matches!(pass, RasterPass::Blend) {
@@ -1473,12 +1734,15 @@ fn rasterize_mesh(
                     continue;
                 }
 
-                let depth = v0.depth * w0 + v1.depth * w1 + v2.depth * w2;
+                let mut depth = v0.depth * w0 + v1.depth * w1 + v2.depth * w2;
                 if !(0.0..=1.0).contains(&depth) {
                     edge0 += edge0_a;
                     edge1 += edge1_a;
                     edge2 += edge2_a;
                     continue;
+                }
+                if !is_subject_layer {
+                    depth = (depth + 6.0e-4).min(1.0);
                 }
                 let idx = (y as usize) * width_usize + (x as usize);
                 let depth_pass = if write_depth {
@@ -1511,8 +1775,15 @@ fn rasterize_mesh(
                         .material_index
                         .or(v1.material_index)
                         .or(v2.material_index);
-                    let sample =
-                        sample_material(scene, material_index, uv0, uv1, vertex_color, config);
+                    let sample = sample_material(
+                        scene,
+                        material_index,
+                        uv0,
+                        uv1,
+                        depth,
+                        vertex_color,
+                        config,
+                    );
                     if matches!(pass, RasterPass::Mask) && sample.alpha < sample.alpha_cutoff {
                         edge0 += edge0_a;
                         edge1 += edge1_a;
@@ -1532,20 +1803,30 @@ fn rasterize_mesh(
                     let base_light = ((lighting
                         + edge_factor * config.edge_accent_strength * 0.22)
                         * (1.0 - fog.clamp(0.0, 1.0)))
-                    .clamp(0.0, 1.0);
+                    .clamp(0.0, 1.0)
+                        * layer_luma_scale;
                     let mut shaded_rgb = [
                         sample.albedo_linear[0] * base_light + sample.emissive_linear[0],
                         sample.albedo_linear[1] * base_light + sample.emissive_linear[1],
                         sample.albedo_linear[2] * base_light + sample.emissive_linear[2],
                     ];
-                    if config.material_color {
+                    if !is_subject_layer {
+                        shaded_rgb = scale_rgb(shaded_rgb, layer_luma_scale);
+                    }
+                    if config.material_color && is_subject_layer {
                         let sat_gain = clarity_saturation_gain(config.clarity_profile)
                             + edge_factor * config.edge_accent_strength * 0.18;
                         shaded_rgb = boost_saturation(shaded_rgb, sat_gain);
                     }
                     let base = luminance(shaded_rgb);
-                    push_histogram(histogram, histogram_count, base);
-                    let floor = contrast.floor.max(config.model_lift.clamp(0.02, 0.45));
+                    if is_subject_layer || !config.subject_exposure_only {
+                        push_histogram(histogram, histogram_count, base);
+                    }
+                    let floor = if is_subject_layer {
+                        contrast.floor.max(config.model_lift.clamp(0.02, 0.45))
+                    } else {
+                        (contrast.floor * 0.45).clamp(0.01, 0.18)
+                    };
                     let mut intensity = tone_map_intensity(base, floor, contrast.gamma, exposure);
                     if matches!(pass, RasterPass::Blend) {
                         let alpha = sample.alpha.clamp(0.0, 1.0);
@@ -1555,7 +1836,11 @@ fn rasterize_mesh(
                     frame.glyphs[idx] = glyph_for_intensity(intensity, charset);
                     if matches!(config.color_mode, ColorMode::Ansi) {
                         let mut out_rgb = if config.material_color {
-                            let color_scale = color_scale_from_tonemap(base, intensity);
+                            let color_scale = if is_subject_layer {
+                                color_scale_from_tonemap(base, intensity)
+                            } else {
+                                color_scale_from_tonemap(base, intensity).min(1.35)
+                            };
                             to_display_rgb(scale_rgb(shaded_rgb, color_scale))
                         } else {
                             model_color_for_intensity(intensity, palette)
@@ -1614,12 +1899,21 @@ fn rasterize_braille_mesh(
     let width = i32::from(subpixels.width);
     let height = i32::from(subpixels.height);
     let width_usize = usize::from(subpixels.width);
-    let triangle_stride = if matches!(pass, RasterPass::Blend) && is_subject_layer {
-        (config.triangle_stride / 2).max(1)
+    let base_stride = config.triangle_stride.max(1);
+    let triangle_stride = if is_subject_layer {
+        if matches!(pass, RasterPass::Blend) {
+            (base_stride / 2).max(1)
+        } else {
+            base_stride.min(2)
+        }
     } else {
-        config.triangle_stride.max(1)
+        base_stride.saturating_mul(6).clamp(2, 32)
     };
-    let min_triangle_area_px2 = config.min_triangle_area_px2.max(0.0);
+    let min_triangle_area_px2 = if is_subject_layer {
+        (config.min_triangle_area_px2 * 0.35).max(0.0)
+    } else {
+        (config.min_triangle_area_px2.max(0.2) * 2.2).max(0.2)
+    };
     if width <= 0 || height <= 0 {
         return;
     }
@@ -1627,8 +1921,18 @@ fn rasterize_braille_mesh(
     if !pass.matches(material_props.alpha_mode) {
         return;
     }
+    if !is_subject_layer && matches!(pass, RasterPass::Blend) {
+        // Stage blend pass is expensive and tends to shimmer in terminal rasterization.
+        return;
+    }
     stats.triangles_total += mesh.indices.len();
     let write_depth = !matches!(pass, RasterPass::Blend);
+    let layer_luma_scale = if is_subject_layer {
+        1.0
+    } else {
+        ((1.0 - config.bg_suppression.clamp(0.0, 1.0) * 0.88).clamp(0.12, 1.0))
+            .min(config.stage_luma_cap.clamp(0.0, 1.0))
+    };
 
     let mut triangle_order = Vec::with_capacity(mesh.indices.len());
     if matches!(pass, RasterPass::Blend) {
@@ -1728,12 +2032,15 @@ fn rasterize_braille_mesh(
                     edge2 += edge2_a;
                     continue;
                 }
-                let depth = v0.depth * w0 + v1.depth * w1 + v2.depth * w2;
+                let mut depth = v0.depth * w0 + v1.depth * w1 + v2.depth * w2;
                 if !(0.0..=1.0).contains(&depth) {
                     edge0 += edge0_a;
                     edge1 += edge1_a;
                     edge2 += edge2_a;
                     continue;
+                }
+                if !is_subject_layer {
+                    depth = (depth + 6.0e-4).min(1.0);
                 }
                 let idx = (y as usize) * width_usize + (x as usize);
                 let depth_pass = if write_depth {
@@ -1773,8 +2080,15 @@ fn rasterize_braille_mesh(
                         .material_index
                         .or(v1.material_index)
                         .or(v2.material_index);
-                    let sample =
-                        sample_material(scene, material_index, uv0, uv1, vertex_color, config);
+                    let sample = sample_material(
+                        scene,
+                        material_index,
+                        uv0,
+                        uv1,
+                        depth,
+                        vertex_color,
+                        config,
+                    );
                     if matches!(pass, RasterPass::Mask) && sample.alpha < sample.alpha_cutoff {
                         edge0 += edge0_a;
                         edge1 += edge1_a;
@@ -1794,20 +2108,30 @@ fn rasterize_braille_mesh(
                     let base_light = ((lighting
                         + edge_factor * config.edge_accent_strength * 0.22)
                         * (1.0 - fog.clamp(0.0, 1.0)))
-                    .clamp(0.0, 1.0);
+                    .clamp(0.0, 1.0)
+                        * layer_luma_scale;
                     let mut shaded_rgb = [
                         sample.albedo_linear[0] * base_light + sample.emissive_linear[0],
                         sample.albedo_linear[1] * base_light + sample.emissive_linear[1],
                         sample.albedo_linear[2] * base_light + sample.emissive_linear[2],
                     ];
-                    if config.material_color {
+                    if !is_subject_layer {
+                        shaded_rgb = scale_rgb(shaded_rgb, layer_luma_scale);
+                    }
+                    if config.material_color && is_subject_layer {
                         let sat_gain = clarity_saturation_gain(config.clarity_profile)
                             + edge_factor * config.edge_accent_strength * 0.18;
                         shaded_rgb = boost_saturation(shaded_rgb, sat_gain);
                     }
                     let base = luminance(shaded_rgb);
-                    push_histogram(histogram, histogram_count, base);
-                    let floor = threshold.floor.max(config.model_lift.clamp(0.02, 0.45));
+                    if is_subject_layer || !config.subject_exposure_only {
+                        push_histogram(histogram, histogram_count, base);
+                    }
+                    let floor = if is_subject_layer {
+                        threshold.floor.max(config.model_lift.clamp(0.02, 0.45))
+                    } else {
+                        (threshold.floor * 0.45).clamp(0.01, 0.18)
+                    };
                     let mut intensity = tone_map_intensity(base, floor, threshold.gamma, exposure);
                     if matches!(pass, RasterPass::Blend) {
                         let alpha = sample.alpha.clamp(0.0, 1.0);
@@ -1815,7 +2139,11 @@ fn rasterize_braille_mesh(
                     }
                     subpixels.intensity[idx] = intensity;
                     let mut out_rgb = if config.material_color {
-                        let color_scale = color_scale_from_tonemap(base, intensity);
+                        let color_scale = if is_subject_layer {
+                            color_scale_from_tonemap(base, intensity)
+                        } else {
+                            color_scale_from_tonemap(base, intensity).min(1.35)
+                        };
                         to_display_rgb(scale_rgb(shaded_rgb, color_scale))
                     } else {
                         model_color_for_intensity(intensity, palette)

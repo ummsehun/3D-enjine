@@ -6,8 +6,10 @@ use std::{
 use crate::scene::{
     AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
     CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
-    ClarityProfile, ColorMode, ContrastProfile, DetailProfile, GraphicsProtocol, PerfProfile,
-    RenderBackend, RenderOutputMode, SyncPolicy, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
+    ClarityProfile, ColorMode, ContrastProfile, DetailProfile, GraphicsProtocol, KittyCompression,
+    KittyInternalResPreset, KittyPipelineMode, KittyTransport, PerfProfile, RecoverStrategy,
+    RenderBackend, RenderOutputMode, StageRole, SyncPolicy, SyncSpeedMode, TextureSamplerMode,
+    TextureSamplingMode, TextureVOrigin, ThemeStyle,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +27,21 @@ pub struct GasciiConfig {
     pub ascii_force_color: bool,
     pub output_mode: RenderOutputMode,
     pub graphics_protocol: GraphicsProtocol,
+    pub kitty_transport: KittyTransport,
+    pub kitty_compression: KittyCompression,
+    pub kitty_internal_res: KittyInternalResPreset,
+    pub kitty_pipeline_mode: KittyPipelineMode,
+    pub recover_strategy: RecoverStrategy,
+    pub kitty_scale: f32,
+    pub hq_target_fps: u32,
+    pub subject_exposure_only: bool,
+    pub subject_target_height_ratio: f32,
+    pub subject_target_width_ratio: f32,
+    pub quality_auto_distance: bool,
+    pub texture_mip_bias: f32,
+    pub stage_as_sub_only: bool,
+    pub stage_role: StageRole,
+    pub stage_luma_cap: f32,
     pub recover_color_auto: bool,
     pub braille_profile: BrailleProfile,
     pub theme_style: ThemeStyle,
@@ -54,6 +71,8 @@ pub struct GasciiConfig {
     pub camera_focus: CameraFocusMode,
     pub material_color: bool,
     pub texture_sampling: TextureSamplingMode,
+    pub texture_v_origin: TextureVOrigin,
+    pub texture_sampler: TextureSamplerMode,
     pub braille_aspect_compensation: f32,
     pub model_lift: f32,
     pub edge_accent_strength: f32,
@@ -84,6 +103,21 @@ impl Default for GasciiConfig {
             ascii_force_color: true,
             output_mode: RenderOutputMode::Text,
             graphics_protocol: GraphicsProtocol::Auto,
+            kitty_transport: KittyTransport::Shm,
+            kitty_compression: KittyCompression::None,
+            kitty_internal_res: KittyInternalResPreset::R640x360,
+            kitty_pipeline_mode: KittyPipelineMode::RealPixel,
+            recover_strategy: RecoverStrategy::Hard,
+            kitty_scale: 1.0,
+            hq_target_fps: 24,
+            subject_exposure_only: true,
+            subject_target_height_ratio: 0.66,
+            subject_target_width_ratio: 0.42,
+            quality_auto_distance: true,
+            texture_mip_bias: 0.0,
+            stage_as_sub_only: true,
+            stage_role: StageRole::Sub,
+            stage_luma_cap: 0.35,
             recover_color_auto: true,
             braille_profile: BrailleProfile::Safe,
             theme_style: ThemeStyle::Theater,
@@ -113,6 +147,8 @@ impl Default for GasciiConfig {
             camera_focus: CameraFocusMode::Auto,
             material_color: true,
             texture_sampling: TextureSamplingMode::Nearest,
+            texture_v_origin: TextureVOrigin::Gltf,
+            texture_sampler: TextureSamplerMode::Gltf,
             braille_aspect_compensation: 1.00,
             model_lift: 0.12,
             edge_accent_strength: 0.32,
@@ -277,11 +313,108 @@ pub fn load_gascii_config(path: &Path) -> GasciiConfig {
                 let lower = value.to_ascii_lowercase();
                 cfg.output_mode = if lower.starts_with("text") {
                     RenderOutputMode::Text
-                } else if lower.starts_with("graph") {
-                    RenderOutputMode::Graphics
+                } else if lower.starts_with("kit") || lower.starts_with("graph") {
+                    RenderOutputMode::KittyHq
                 } else {
                     RenderOutputMode::Hybrid
                 };
+            }
+            "kitty_transport" | "transport" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.kitty_transport = if lower.starts_with("dir") {
+                    KittyTransport::Direct
+                } else {
+                    KittyTransport::Shm
+                };
+            }
+            "kitty_compression" | "compression" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.kitty_compression = if lower.starts_with("z") {
+                    KittyCompression::Zlib
+                } else {
+                    KittyCompression::None
+                };
+            }
+            "kitty_internal_res" | "internal_res" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.kitty_internal_res = if lower.contains("1280x720") || lower.contains("720") {
+                    KittyInternalResPreset::R1280x720
+                } else if lower.contains("854x480") || lower.contains("480") {
+                    KittyInternalResPreset::R854x480
+                } else {
+                    KittyInternalResPreset::R640x360
+                };
+            }
+            "kitty_pipeline" | "kitty_pipeline_mode" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.kitty_pipeline_mode = if lower.starts_with("glyph") {
+                    KittyPipelineMode::GlyphCompat
+                } else {
+                    KittyPipelineMode::RealPixel
+                };
+            }
+            "recover_strategy" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.recover_strategy = if lower.starts_with("off") || lower == "0" {
+                    RecoverStrategy::Off
+                } else if lower.starts_with("soft") {
+                    RecoverStrategy::Soft
+                } else {
+                    RecoverStrategy::Hard
+                };
+            }
+            "kitty_scale" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    cfg.kitty_scale = parsed.clamp(0.5, 2.0);
+                }
+            }
+            "hq_target_fps" | "kitty_target_fps" => {
+                if let Ok(parsed) = value.parse::<u32>() {
+                    cfg.hq_target_fps = parsed.clamp(12, 120);
+                }
+            }
+            "subject_exposure_only" => {
+                if let Some(parsed) = parse_bool(value) {
+                    cfg.subject_exposure_only = parsed;
+                }
+            }
+            "subject_target_height" | "subject_target_height_ratio" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    cfg.subject_target_height_ratio = parsed.clamp(0.20, 0.95);
+                }
+            }
+            "subject_target_width" | "subject_target_width_ratio" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    cfg.subject_target_width_ratio = parsed.clamp(0.10, 0.95);
+                }
+            }
+            "quality_auto_distance" => {
+                if let Some(parsed) = parse_bool(value) {
+                    cfg.quality_auto_distance = parsed;
+                }
+            }
+            "texture_mip_bias" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    cfg.texture_mip_bias = parsed.clamp(-2.0, 4.0);
+                }
+            }
+            "stage_as_sub_only" => {
+                if let Some(parsed) = parse_bool(value) {
+                    cfg.stage_as_sub_only = parsed;
+                }
+            }
+            "stage_role" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.stage_role = if lower.starts_with("off") || lower == "0" {
+                    StageRole::Off
+                } else {
+                    StageRole::Sub
+                };
+            }
+            "stage_luma_cap" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    cfg.stage_luma_cap = parsed.clamp(0.0, 1.0);
+                }
             }
             "recover_color" => {
                 let lower = value.to_ascii_lowercase();
@@ -518,6 +651,22 @@ pub fn load_gascii_config(path: &Path) -> GasciiConfig {
                     TextureSamplingMode::Nearest
                 };
             }
+            "texture_v_origin" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.texture_v_origin = if lower.starts_with("leg") {
+                    TextureVOrigin::Legacy
+                } else {
+                    TextureVOrigin::Gltf
+                };
+            }
+            "texture_sampler" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.texture_sampler = if lower.starts_with("over") {
+                    TextureSamplerMode::Override
+                } else {
+                    TextureSamplerMode::Gltf
+                };
+            }
             "braille_aspect_compensation" => {
                 if let Ok(parsed) = value.parse::<f32>() {
                     cfg.braille_aspect_compensation = parsed.clamp(0.70, 1.30);
@@ -576,6 +725,14 @@ mod tests {
         assert!(cfg.ascii_force_color);
         assert_eq!(cfg.output_mode, RenderOutputMode::Text);
         assert_eq!(cfg.graphics_protocol, GraphicsProtocol::Auto);
+        assert_eq!(cfg.kitty_transport, KittyTransport::Shm);
+        assert_eq!(cfg.kitty_compression, KittyCompression::None);
+        assert_eq!(cfg.kitty_internal_res, KittyInternalResPreset::R640x360);
+        assert!((cfg.kitty_scale - 1.0).abs() < 1e-6);
+        assert_eq!(cfg.hq_target_fps, 24);
+        assert!(cfg.subject_exposure_only);
+        assert_eq!(cfg.stage_role, StageRole::Sub);
+        assert!((cfg.stage_luma_cap - 0.35).abs() < 1e-6);
         assert!(cfg.recover_color_auto);
         assert_eq!(cfg.braille_profile, BrailleProfile::Safe);
         assert_eq!(cfg.theme_style, ThemeStyle::Theater);
@@ -605,6 +762,8 @@ mod tests {
         assert_eq!(cfg.camera_focus, CameraFocusMode::Auto);
         assert!(cfg.material_color);
         assert_eq!(cfg.texture_sampling, TextureSamplingMode::Nearest);
+        assert_eq!(cfg.texture_v_origin, TextureVOrigin::Gltf);
+        assert_eq!(cfg.texture_sampler, TextureSamplerMode::Gltf);
         assert!((cfg.braille_aspect_compensation - 1.00).abs() < 1e-6);
         assert!((cfg.model_lift - 0.12).abs() < 1e-6);
         assert!((cfg.edge_accent_strength - 0.32).abs() < 1e-6);
@@ -670,14 +829,22 @@ mod tests {
         let path = dir.path().join("Gascii.config");
         fs::write(
             &path,
-            "cell_aspect_mode = manual\ncell_aspect_trim = 1.15\ncontrast_profile = fixed\nsync_offset_ms = -120\nsync_speed_mode = realtime\nsync_policy = fixed\nsync_hard_snap_ms = 160\nsync_kp = 0.2\ncolor_mode=ansi\nascii_force_color=false\noutput_mode=graphics\nrecover_color=off\ngraphics_protocol=kitty\nupscale_factor=4\nupscale_sharpen=0.6\nbraille_profile=normal\ntheme=holo\naudio_reactive=high\ncinematic_camera=aggressive\nreactive_gain=0.42\nperf_profile=smooth\ndetail_profile=ultra\nclarity_profile=extreme\nansi_quantization=off\nbackend=gpu-preview\nstage_dir=assets/stage\nstage_selection=world is mine\nexposure_bias=0.18\ncenter_lock=false\ncenter_lock_mode=mixed\nwasd_mode=orbit\nfreefly_speed=2.4\ncamera_look_speed=1.8\ncamera_dir=assets/camera\ncamera_selection=none\ncamera_mode=blend\ncamera_align_preset=alt-b\ncamera_unit_scale=0.12\ncamera_vmd_fps=60\ncamera_vmd_path=assets/camera/world_is_mine.vmd\ncamera_focus=face\nmaterial_color=off\ntexture_sampling=bilinear\nbraille_aspect_compensation=1.12\nmodel_lift=0.2\nedge_accent_strength=0.5\nbg_suppression=0.42\nstage_level=4\nstage_reactive=off\n",
+            "cell_aspect_mode = manual\ncell_aspect_trim = 1.15\ncontrast_profile = fixed\nsync_offset_ms = -120\nsync_speed_mode = realtime\nsync_policy = fixed\nsync_hard_snap_ms = 160\nsync_kp = 0.2\ncolor_mode=ansi\nascii_force_color=false\noutput_mode=kitty-hq\nkitty_transport=direct\nkitty_compression=zlib\nkitty_internal_res=1280x720\nkitty_scale=1.25\nhq_target_fps=30\nsubject_exposure_only=off\nstage_role=off\nstage_luma_cap=0.55\nrecover_color=off\ngraphics_protocol=kitty\nupscale_factor=4\nupscale_sharpen=0.6\nbraille_profile=normal\ntheme=holo\naudio_reactive=high\ncinematic_camera=aggressive\nreactive_gain=0.42\nperf_profile=smooth\ndetail_profile=ultra\nclarity_profile=extreme\nansi_quantization=off\nbackend=gpu-preview\nstage_dir=assets/stage\nstage_selection=world is mine\nexposure_bias=0.18\ncenter_lock=false\ncenter_lock_mode=mixed\nwasd_mode=orbit\nfreefly_speed=2.4\ncamera_look_speed=1.8\ncamera_dir=assets/camera\ncamera_selection=none\ncamera_mode=blend\ncamera_align_preset=alt-b\ncamera_unit_scale=0.12\ncamera_vmd_fps=60\ncamera_vmd_path=assets/camera/world_is_mine.vmd\ncamera_focus=face\nmaterial_color=off\ntexture_sampling=bilinear\ntexture_v_origin=legacy\ntexture_sampler=override\nbraille_aspect_compensation=1.12\nmodel_lift=0.2\nedge_accent_strength=0.5\nbg_suppression=0.42\nstage_level=4\nstage_reactive=off\n",
         )
         .expect("write config");
 
         let cfg = load_gascii_config(&path);
         assert_eq!(cfg.color_mode, Some(ColorMode::Ansi));
         assert!(!cfg.ascii_force_color);
-        assert_eq!(cfg.output_mode, RenderOutputMode::Graphics);
+        assert_eq!(cfg.output_mode, RenderOutputMode::KittyHq);
+        assert_eq!(cfg.kitty_transport, KittyTransport::Direct);
+        assert_eq!(cfg.kitty_compression, KittyCompression::Zlib);
+        assert_eq!(cfg.kitty_internal_res, KittyInternalResPreset::R1280x720);
+        assert!((cfg.kitty_scale - 1.25).abs() < 1e-6);
+        assert_eq!(cfg.hq_target_fps, 30);
+        assert!(!cfg.subject_exposure_only);
+        assert_eq!(cfg.stage_role, StageRole::Off);
+        assert!((cfg.stage_luma_cap - 0.55).abs() < 1e-6);
         assert!(!cfg.recover_color_auto);
         assert_eq!(cfg.graphics_protocol, GraphicsProtocol::Kitty);
         assert_eq!(cfg.upscale_factor, 4);
@@ -713,6 +880,8 @@ mod tests {
         assert_eq!(cfg.camera_focus, CameraFocusMode::Face);
         assert!(!cfg.material_color);
         assert_eq!(cfg.texture_sampling, TextureSamplingMode::Bilinear);
+        assert_eq!(cfg.texture_v_origin, TextureVOrigin::Legacy);
+        assert_eq!(cfg.texture_sampler, TextureSamplerMode::Override);
         assert!((cfg.braille_aspect_compensation - 1.12).abs() < 1e-6);
         assert!((cfg.model_lift - 0.2).abs() < 1e-6);
         assert!((cfg.edge_accent_strength - 0.5).abs() < 1e-6);

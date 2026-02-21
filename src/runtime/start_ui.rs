@@ -699,7 +699,14 @@ impl StartWizardState {
 
     fn adjust_camera_value(&mut self, camera_len: usize, delta: i32) {
         match self.camera_focus_index {
-            0 => cycle_index(&mut self.camera_index, camera_len, delta),
+            0 => {
+                cycle_index(&mut self.camera_index, camera_len, delta);
+                if self.camera_index == 0 {
+                    self.camera_mode = CameraMode::Off;
+                } else if matches!(self.camera_mode, CameraMode::Off) {
+                    self.camera_mode = CameraMode::Vmd;
+                }
+            }
             1 => {
                 self.camera_mode = match self.camera_mode {
                     CameraMode::Off => CameraMode::Vmd,
@@ -879,8 +886,8 @@ impl StartWizardState {
             26 => {
                 self.output_mode = match self.output_mode {
                     RenderOutputMode::Text => RenderOutputMode::Hybrid,
-                    RenderOutputMode::Hybrid => RenderOutputMode::Graphics,
-                    RenderOutputMode::Graphics => RenderOutputMode::Text,
+                    RenderOutputMode::Hybrid => RenderOutputMode::KittyHq,
+                    RenderOutputMode::KittyHq => RenderOutputMode::Text,
                 };
             }
             27 => {
@@ -1560,7 +1567,7 @@ fn draw_render_options(
     let output_mode = match state.output_mode {
         RenderOutputMode::Text => tr(ui_language, "텍스트", "Text"),
         RenderOutputMode::Hybrid => tr(ui_language, "하이브리드", "Hybrid"),
-        RenderOutputMode::Graphics => tr(ui_language, "그래픽", "Graphics"),
+        RenderOutputMode::KittyHq => tr(ui_language, "Kitty HQ", "Kitty HQ"),
     };
     let graphics_protocol = match state.graphics_protocol {
         GraphicsProtocol::Auto => "auto",
@@ -1931,7 +1938,7 @@ fn draw_confirm_panel(
     let output_mode = match selection.output_mode {
         RenderOutputMode::Text => "Text",
         RenderOutputMode::Hybrid => "Hybrid",
-        RenderOutputMode::Graphics => "Graphics",
+        RenderOutputMode::KittyHq => "KittyHq",
     };
     let graphics_protocol = match selection.graphics_protocol {
         GraphicsProtocol::Auto => "auto",
@@ -2725,6 +2732,17 @@ mod tests {
         let before = state.cell_aspect_trim;
         state.apply_event(key(KeyCode::Right));
         assert!(state.cell_aspect_trim > before);
+    }
+
+    #[test]
+    fn selecting_camera_source_auto_enables_vmd_mode() {
+        let mut state = test_state();
+        state.step = StartWizardStep::Camera;
+        state.camera_mode = CameraMode::Off;
+        state.camera_focus_index = 0;
+        state.apply_event(key(KeyCode::Right));
+        assert_eq!(state.camera_index, 1);
+        assert!(matches!(state.camera_mode, CameraMode::Vmd));
     }
 
     #[test]

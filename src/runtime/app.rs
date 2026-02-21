@@ -31,7 +31,9 @@ use crate::{
     renderer::{Camera, FrameBuffers, GlyphRamp, RenderScratch, RenderStats},
     runtime::{
         config::{GasciiConfig, load_gascii_config},
-        graphics_proto::detect_supported_protocol,
+        graphics_proto::{
+            cleanup_orphan_shm_files, cleanup_shm_registry, detect_supported_protocol,
+        },
         preprocess::run_preprocess,
         preview::run_preview_server,
         start_ui::{
@@ -42,15 +44,21 @@ use crate::{
         AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
         CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
         ClarityProfile, ColorMode, ContrastProfile, DetailProfile, FreeFlyState, GraphicsProtocol,
-        MeshLayer, Node, PerfProfile, RenderBackend, RenderConfig, RenderMode, RenderOutputMode,
-        SceneCpu, SyncPolicy, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
-        estimate_cell_aspect_from_window, resolve_cell_aspect,
+        KittyCompression, KittyInternalResPreset, KittyPipelineMode, KittyTransport, MeshLayer,
+        Node, PerfProfile, RecoverStrategy, RenderBackend, RenderConfig, RenderMode,
+        RenderOutputMode, SceneCpu, StageRole, SyncPolicy, SyncSpeedMode, TextureSamplingMode,
+        ThemeStyle, estimate_cell_aspect_from_window, kitty_internal_resolution,
+        resolve_cell_aspect,
     },
     terminal::{PresentMode, TerminalSession, supports_truecolor},
 };
 
 pub fn run(cli: Cli) -> Result<()> {
     install_runtime_panic_hook_once();
+    let cleaned = cleanup_orphan_shm_files();
+    if cleaned > 0 {
+        eprintln!("info: cleaned {cleaned} orphan kitty shm buffer(s)");
+    }
     match cli.command {
         Commands::Start(args) => start(args),
         Commands::Run(args) => run_interactive(args),
@@ -218,6 +226,7 @@ struct RuntimeInputResult {
     status_changed: bool,
     resized: bool,
     terminal_size_unstable: bool,
+    resized_terminal: Option<(u16, u16)>,
     stage_changed: bool,
     center_lock_blocked_pan: bool,
     center_lock_auto_disabled: bool,
@@ -241,13 +250,16 @@ impl RuntimeCameraState {
         track_mode: CameraMode,
         has_track_source: bool,
     ) -> Self {
-        let track_enabled = has_track_source
-            && !matches!(track_mode, CameraMode::Off)
-            && !matches!(control_mode, CameraControlMode::FreeFly);
+        let track_capable = has_track_source && !matches!(track_mode, CameraMode::Off);
+        let effective_control_mode = if track_capable {
+            CameraControlMode::Orbit
+        } else {
+            control_mode
+        };
         Self {
-            control_mode,
-            previous_control_mode: CameraControlMode::Orbit,
-            track_enabled,
+            control_mode: effective_control_mode,
+            previous_control_mode: effective_control_mode,
+            track_enabled: track_capable,
             active_track_mode: track_mode,
             saved_track_mode: track_mode,
         }
@@ -498,26 +510,32 @@ impl VisibilityWatchdog {
 struct CenterLockState {
     err_x_ema: f32,
     err_y_ema: f32,
-    world_offset: Vec3,
 }
 
 impl CenterLockState {
-    fn update(
+    fn apply_camera_space(
         &mut self,
         stats: &RenderStats,
         mode: CenterLockMode,
         frame_width: u16,
         frame_height: u16,
-        radius: f32,
+        camera: &mut Camera,
+        fov_deg: f32,
+        cell_aspect: f32,
         extent_y: f32,
-    ) -> Vec3 {
+    ) {
+        let fw = f32::from(frame_width.max(1));
+        let fh = f32::from(frame_height.max(1));
+        let root_in_view = stats.root_screen_px.filter(|(x, y)| {
+            x.is_finite() && y.is_finite() && *x >= 0.0 && *x <= fw && *y >= 0.0 && *y <= fh
+        });
         let anchor = match mode {
             CenterLockMode::Root => stats
-                .root_screen_px
-                .or(stats.subject_centroid_px)
+                .subject_centroid_px
+                .or(root_in_view)
                 .or(stats.visible_centroid_px),
             CenterLockMode::Mixed => match (
-                stats.root_screen_px,
+                root_in_view,
                 stats.subject_centroid_px.or(stats.visible_centroid_px),
             ) {
                 (Some(root), Some(centroid)) => Some((
@@ -526,48 +544,68 @@ impl CenterLockState {
                 )),
                 (Some(root), None) => Some(root),
                 (None, Some(centroid)) => Some(centroid),
-                (None, None) => None,
+                (None, None) => root_in_view,
             },
         };
         let Some((cx, cy)) = anchor else {
             self.err_x_ema *= 0.85;
             self.err_y_ema *= 0.85;
-            self.world_offset *= 0.92;
-            return self.world_offset;
+            return;
         };
 
-        let fw = f32::from(frame_width.max(1));
-        let fh = f32::from(frame_height.max(1));
         // Ignore stale or out-of-range anchors (common during terminal resize transitions).
         if cx < -fw * 0.25 || cx > fw * 1.25 || cy < -fh * 0.25 || cy > fh * 1.25 {
             self.err_x_ema *= 0.85;
             self.err_y_ema *= 0.85;
-            self.world_offset *= 0.92;
-            return self.world_offset;
+            return;
         }
         let nx = ((cx / fw - 0.5) * 2.0).clamp(-1.0, 1.0);
         let ny = ((cy / fh - 0.5) * 2.0).clamp(-1.0, 1.0);
         let dead_x = if nx.abs() < 0.015 { 0.0 } else { nx };
         let dead_y = if ny.abs() < 0.020 { 0.0 } else { ny };
 
-        self.err_x_ema += (dead_x - self.err_x_ema) * 0.18;
-        self.err_y_ema += (dead_y - self.err_y_ema) * 0.18;
+        let large_error = dead_x.abs() > 0.35 || dead_y.abs() > 0.35;
+        if large_error {
+            self.err_x_ema = dead_x;
+            self.err_y_ema = dead_y;
+        } else {
+            self.err_x_ema += (dead_x - self.err_x_ema) * 0.28;
+            self.err_y_ema += (dead_y - self.err_y_ema) * 0.28;
+        }
 
-        let radius = radius.max(0.2);
         let extent = extent_y.max(0.5);
-        let target = Vec3::new(
-            (-self.err_x_ema * radius * 0.32).clamp(-extent * 0.35, extent * 0.35),
-            (-self.err_y_ema * extent * 0.28).clamp(-extent * 0.35, extent * 0.35),
-            (self.err_x_ema * radius * 0.08).clamp(-extent * 0.35, extent * 0.35),
-        );
-        self.world_offset += (target - self.world_offset) * 0.12;
-        self.world_offset
+        let mut forward = camera.target - camera.eye;
+        if forward.length_squared() <= f32::EPSILON {
+            return;
+        }
+        forward = forward.normalize();
+        let mut right = forward.cross(camera.up);
+        if right.length_squared() <= f32::EPSILON {
+            return;
+        }
+        right = right.normalize();
+        let mut up = right.cross(forward);
+        if up.length_squared() <= f32::EPSILON {
+            return;
+        }
+        up = up.normalize();
+
+        let dist = (camera.target - camera.eye).length().max(0.2);
+        let fov_y = fov_deg.to_radians().clamp(0.35, 2.6);
+        let aspect = ((fw * cell_aspect.max(0.15)).max(1.0) / fh.max(1.0)).clamp(0.3, 5.0);
+        let tan_y = (fov_y * 0.5).tan().max(0.01);
+        let fov_x = 2.0 * (tan_y * aspect).atan();
+        let tan_x = (fov_x * 0.5).tan().max(0.01);
+        let shift_x = (self.err_x_ema * dist * tan_x * 0.95).clamp(-extent * 0.9, extent * 0.9);
+        let shift_y = (-self.err_y_ema * dist * tan_y * 0.95).clamp(-extent * 0.75, extent * 0.75);
+        let shift = right * shift_x + up * shift_y;
+        camera.eye += shift;
+        camera.target += shift;
     }
 
     fn reset(&mut self) {
         self.err_x_ema = 0.0;
         self.err_y_ema = 0.0;
-        self.world_offset = Vec3::ZERO;
     }
 }
 
@@ -733,9 +771,20 @@ impl DistanceClampGuard {
     }
 }
 
-fn dynamic_clip_planes(min_dist: f32, extent_y: f32) -> (f32, f32) {
-    let near = (min_dist * 0.08).clamp(0.01, 0.08);
-    let far = (min_dist + extent_y * 6.0).clamp(near + 2.0, 300.0);
+fn dynamic_clip_planes(
+    min_dist: f32,
+    extent_y: f32,
+    camera_dist: f32,
+    has_stage: bool,
+) -> (f32, f32) {
+    let near = (min_dist * 0.06).clamp(0.015, 0.10);
+    let subject_far = min_dist + extent_y * 6.0;
+    let far_target = if has_stage {
+        subject_far.max(camera_dist + extent_y * 16.0)
+    } else {
+        subject_far
+    };
+    let far = far_target.clamp(near + 3.0, 500.0);
     (near, far)
 }
 
@@ -895,6 +944,21 @@ fn start(args: StartArgs) -> Result<()> {
             output_mode: selection.output_mode,
             recover_color_auto: visual.recover_color_auto,
             graphics_protocol: selection.graphics_protocol,
+            kitty_transport: visual.kitty_transport,
+            kitty_compression: visual.kitty_compression,
+            kitty_internal_res: visual.kitty_internal_res,
+            kitty_pipeline_mode: visual.kitty_pipeline_mode,
+            recover_strategy: visual.recover_strategy,
+            kitty_scale: visual.kitty_scale,
+            hq_target_fps: visual.hq_target_fps,
+            subject_exposure_only: visual.subject_exposure_only,
+            subject_target_height_ratio: visual.subject_target_height_ratio,
+            subject_target_width_ratio: visual.subject_target_width_ratio,
+            quality_auto_distance: visual.quality_auto_distance,
+            texture_mip_bias: visual.texture_mip_bias,
+            stage_as_sub_only: visual.stage_as_sub_only,
+            stage_role: visual.stage_role,
+            stage_luma_cap: visual.stage_luma_cap,
             cell_aspect_mode: selection.cell_aspect_mode,
             cell_aspect_trim: selection.cell_aspect_trim,
             contrast_profile: selection.contrast_profile,
@@ -915,6 +979,8 @@ fn start(args: StartArgs) -> Result<()> {
             camera_focus: selection.camera_focus,
             material_color: selection.material_color,
             texture_sampling: selection.texture_sampling,
+            texture_v_origin: visual.texture_v_origin,
+            texture_sampler: visual.texture_sampler,
             clarity_profile: selection.clarity_profile,
             ansi_quantization: selection.ansi_quantization,
             model_lift: selection.model_lift,
@@ -952,8 +1018,10 @@ fn start(args: StartArgs) -> Result<()> {
     config.center_lock_mode = selection.center_lock_mode;
     let wasd_mode = selection.wasd_mode;
     let freefly_speed = selection.freefly_speed;
+    let effective_camera_mode =
+        resolve_effective_camera_mode(selection.camera_mode, selection.camera_vmd_path.is_some());
     let camera_settings = RuntimeCameraSettings {
-        mode: selection.camera_mode,
+        mode: effective_camera_mode,
         align_preset: selection.camera_align_preset,
         unit_scale: selection.camera_unit_scale,
         vmd_fps: visual.camera_vmd_fps,
@@ -1055,8 +1123,10 @@ fn run_interactive(args: RunArgs) -> Result<()> {
     config.sync_hard_snap_ms = sync.sync_hard_snap_ms;
     config.sync_kp = sync.sync_kp;
     apply_runtime_render_tuning(&mut config, &runtime_cfg);
+    let effective_camera_mode =
+        resolve_effective_camera_mode(visual.camera_mode, resolved_camera_vmd_path.is_some());
     let camera_settings = RuntimeCameraSettings {
-        mode: visual.camera_mode,
+        mode: effective_camera_mode,
         align_preset: visual.camera_align_preset,
         unit_scale: visual.camera_unit_scale,
         vmd_fps: visual.camera_vmd_fps,
@@ -1118,6 +1188,21 @@ struct ResolvedVisualOptions {
     output_mode: RenderOutputMode,
     recover_color_auto: bool,
     graphics_protocol: GraphicsProtocol,
+    kitty_transport: KittyTransport,
+    kitty_compression: KittyCompression,
+    kitty_internal_res: KittyInternalResPreset,
+    kitty_pipeline_mode: KittyPipelineMode,
+    recover_strategy: RecoverStrategy,
+    kitty_scale: f32,
+    hq_target_fps: u32,
+    subject_exposure_only: bool,
+    subject_target_height_ratio: f32,
+    subject_target_width_ratio: f32,
+    quality_auto_distance: bool,
+    texture_mip_bias: f32,
+    stage_as_sub_only: bool,
+    stage_role: StageRole,
+    stage_luma_cap: f32,
     cell_aspect_mode: CellAspectMode,
     cell_aspect_trim: f32,
     contrast_profile: ContrastProfile,
@@ -1138,6 +1223,8 @@ struct ResolvedVisualOptions {
     camera_focus: CameraFocusMode,
     material_color: bool,
     texture_sampling: TextureSamplingMode,
+    texture_v_origin: crate::scene::TextureVOrigin,
+    texture_sampler: crate::scene::TextureSamplerMode,
     clarity_profile: ClarityProfile,
     ansi_quantization: AnsiQuantization,
     model_lift: f32,
@@ -1181,6 +1268,66 @@ fn resolve_visual_options_for_start(
             .graphics_protocol
             .map(Into::into)
             .unwrap_or(runtime_cfg.graphics_protocol),
+        kitty_transport: args
+            .kitty_transport
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.kitty_transport),
+        kitty_compression: args
+            .kitty_compression
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.kitty_compression),
+        kitty_internal_res: args
+            .kitty_internal_res
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.kitty_internal_res),
+        kitty_pipeline_mode: args
+            .kitty_pipeline
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.kitty_pipeline_mode),
+        recover_strategy: args
+            .recover_strategy
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.recover_strategy),
+        kitty_scale: args
+            .kitty_scale
+            .unwrap_or(runtime_cfg.kitty_scale)
+            .clamp(0.5, 2.0),
+        hq_target_fps: args
+            .hq_target_fps
+            .unwrap_or(runtime_cfg.hq_target_fps)
+            .clamp(12, 120),
+        subject_exposure_only: args
+            .subject_exposure_only
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.subject_exposure_only),
+        subject_target_height_ratio: args
+            .subject_target_height
+            .unwrap_or(runtime_cfg.subject_target_height_ratio)
+            .clamp(0.20, 0.95),
+        subject_target_width_ratio: args
+            .subject_target_width
+            .unwrap_or(runtime_cfg.subject_target_width_ratio)
+            .clamp(0.10, 0.95),
+        quality_auto_distance: args
+            .quality_auto_distance
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.quality_auto_distance),
+        texture_mip_bias: args
+            .texture_mip_bias
+            .unwrap_or(runtime_cfg.texture_mip_bias)
+            .clamp(-2.0, 4.0),
+        stage_as_sub_only: args
+            .stage_sub_only
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.stage_as_sub_only),
+        stage_role: args
+            .stage_role
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.stage_role),
+        stage_luma_cap: args
+            .stage_luma_cap
+            .unwrap_or(runtime_cfg.stage_luma_cap)
+            .clamp(0.0, 1.0),
         cell_aspect_mode: args
             .cell_aspect_mode
             .map(Into::into)
@@ -1258,6 +1405,14 @@ fn resolve_visual_options_for_start(
             .texture_sampling
             .map(Into::into)
             .unwrap_or(runtime_cfg.texture_sampling),
+        texture_v_origin: args
+            .texture_v_origin
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.texture_v_origin),
+        texture_sampler: args
+            .texture_sampler
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.texture_sampler),
         clarity_profile: args
             .clarity_profile
             .map(Into::into)
@@ -1323,6 +1478,66 @@ fn resolve_visual_options_for_run(
             .graphics_protocol
             .map(Into::into)
             .unwrap_or(runtime_cfg.graphics_protocol),
+        kitty_transport: args
+            .kitty_transport
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.kitty_transport),
+        kitty_compression: args
+            .kitty_compression
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.kitty_compression),
+        kitty_internal_res: args
+            .kitty_internal_res
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.kitty_internal_res),
+        kitty_pipeline_mode: args
+            .kitty_pipeline
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.kitty_pipeline_mode),
+        recover_strategy: args
+            .recover_strategy
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.recover_strategy),
+        kitty_scale: args
+            .kitty_scale
+            .unwrap_or(runtime_cfg.kitty_scale)
+            .clamp(0.5, 2.0),
+        hq_target_fps: args
+            .hq_target_fps
+            .unwrap_or(runtime_cfg.hq_target_fps)
+            .clamp(12, 120),
+        subject_exposure_only: args
+            .subject_exposure_only
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.subject_exposure_only),
+        subject_target_height_ratio: args
+            .subject_target_height
+            .unwrap_or(runtime_cfg.subject_target_height_ratio)
+            .clamp(0.20, 0.95),
+        subject_target_width_ratio: args
+            .subject_target_width
+            .unwrap_or(runtime_cfg.subject_target_width_ratio)
+            .clamp(0.10, 0.95),
+        quality_auto_distance: args
+            .quality_auto_distance
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.quality_auto_distance),
+        texture_mip_bias: args
+            .texture_mip_bias
+            .unwrap_or(runtime_cfg.texture_mip_bias)
+            .clamp(-2.0, 4.0),
+        stage_as_sub_only: args
+            .stage_sub_only
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.stage_as_sub_only),
+        stage_role: args
+            .stage_role
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.stage_role),
+        stage_luma_cap: args
+            .stage_luma_cap
+            .unwrap_or(runtime_cfg.stage_luma_cap)
+            .clamp(0.0, 1.0),
         cell_aspect_mode: args
             .cell_aspect_mode
             .map(Into::into)
@@ -1400,6 +1615,14 @@ fn resolve_visual_options_for_run(
             .texture_sampling
             .map(Into::into)
             .unwrap_or(runtime_cfg.texture_sampling),
+        texture_v_origin: args
+            .texture_v_origin
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.texture_v_origin),
+        texture_sampler: args
+            .texture_sampler
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.texture_sampler),
         clarity_profile: args
             .clarity_profile
             .map(Into::into)
@@ -1462,6 +1685,66 @@ fn resolve_visual_options_for_bench(
             .graphics_protocol
             .map(Into::into)
             .unwrap_or(runtime_cfg.graphics_protocol),
+        kitty_transport: args
+            .kitty_transport
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.kitty_transport),
+        kitty_compression: args
+            .kitty_compression
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.kitty_compression),
+        kitty_internal_res: args
+            .kitty_internal_res
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.kitty_internal_res),
+        kitty_pipeline_mode: args
+            .kitty_pipeline
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.kitty_pipeline_mode),
+        recover_strategy: args
+            .recover_strategy
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.recover_strategy),
+        kitty_scale: args
+            .kitty_scale
+            .unwrap_or(runtime_cfg.kitty_scale)
+            .clamp(0.5, 2.0),
+        hq_target_fps: args
+            .hq_target_fps
+            .unwrap_or(runtime_cfg.hq_target_fps)
+            .clamp(12, 120),
+        subject_exposure_only: args
+            .subject_exposure_only
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.subject_exposure_only),
+        subject_target_height_ratio: args
+            .subject_target_height
+            .unwrap_or(runtime_cfg.subject_target_height_ratio)
+            .clamp(0.20, 0.95),
+        subject_target_width_ratio: args
+            .subject_target_width
+            .unwrap_or(runtime_cfg.subject_target_width_ratio)
+            .clamp(0.10, 0.95),
+        quality_auto_distance: args
+            .quality_auto_distance
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.quality_auto_distance),
+        texture_mip_bias: args
+            .texture_mip_bias
+            .unwrap_or(runtime_cfg.texture_mip_bias)
+            .clamp(-2.0, 4.0),
+        stage_as_sub_only: args
+            .stage_sub_only
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.stage_as_sub_only),
+        stage_role: args
+            .stage_role
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.stage_role),
+        stage_luma_cap: args
+            .stage_luma_cap
+            .unwrap_or(runtime_cfg.stage_luma_cap)
+            .clamp(0.0, 1.0),
         cell_aspect_mode: args
             .cell_aspect_mode
             .map(Into::into)
@@ -1515,6 +1798,14 @@ fn resolve_visual_options_for_bench(
             .texture_sampling
             .map(Into::into)
             .unwrap_or(runtime_cfg.texture_sampling),
+        texture_v_origin: args
+            .texture_v_origin
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.texture_v_origin),
+        texture_sampler: args
+            .texture_sampler
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.texture_sampler),
         clarity_profile: args
             .clarity_profile
             .map(Into::into)
@@ -1629,6 +1920,14 @@ fn resolve_effective_color_mode(
     }
 }
 
+fn resolve_effective_camera_mode(mode: CameraMode, has_vmd_source: bool) -> CameraMode {
+    if has_vmd_source && matches!(mode, CameraMode::Off) {
+        CameraMode::Vmd
+    } else {
+        mode
+    }
+}
+
 fn color_path_label(color_mode: ColorMode, quantization: AnsiQuantization) -> &'static str {
     match color_mode {
         ColorMode::Mono => "mono",
@@ -1643,6 +1942,39 @@ fn apply_runtime_render_tuning(config: &mut RenderConfig, runtime_cfg: &GasciiCo
     config.triangle_stride = runtime_cfg.triangle_stride.max(1);
     config.min_triangle_area_px2 = runtime_cfg.min_triangle_area_px2.max(0.0);
     config.braille_aspect_compensation = runtime_cfg.braille_aspect_compensation;
+}
+
+fn apply_distant_subject_clarity_boost(config: &mut RenderConfig, subject_height_ratio: f32) {
+    if !config.quality_auto_distance
+        || !subject_height_ratio.is_finite()
+        || subject_height_ratio <= 0.0
+    {
+        return;
+    }
+    let target = config.subject_target_height_ratio.clamp(0.20, 0.95);
+    let distant_threshold = (target * 0.65).clamp(0.14, 0.52);
+    let near_threshold = (target * 1.35).clamp(0.45, 0.98);
+
+    if subject_height_ratio < distant_threshold {
+        let t = ((distant_threshold - subject_height_ratio) / distant_threshold).clamp(0.0, 1.0);
+        config.model_lift = (config.model_lift + 0.10 * t).clamp(0.02, 0.55);
+        config.edge_accent_strength = (config.edge_accent_strength + 0.55 * t).clamp(0.0, 2.0);
+        config.bg_suppression = (config.bg_suppression + 0.70 * t).clamp(0.0, 1.0);
+        config.min_triangle_area_px2 = (config.min_triangle_area_px2 * (1.0 - 0.85 * t)).max(0.0);
+        if t > 0.30 {
+            config.triangle_stride = config.triangle_stride.saturating_sub(1).max(1);
+        }
+        if t > 0.70 {
+            config.triangle_stride = config.triangle_stride.saturating_sub(1).max(1);
+        }
+        return;
+    }
+
+    if subject_height_ratio > near_threshold {
+        let t = ((subject_height_ratio - near_threshold) / near_threshold).clamp(0.0, 1.0);
+        config.edge_accent_strength = (config.edge_accent_strength * (1.0 - 0.4 * t)).max(0.05);
+        config.bg_suppression = (config.bg_suppression + 0.10 * t).clamp(0.0, 1.0);
+    }
 }
 
 fn target_frame_ms(profile: PerfProfile) -> f32 {
@@ -1705,6 +2037,84 @@ fn cap_render_size(width: u16, height: u16) -> (u16, u16, bool) {
     (capped_w.max(1), capped_h.max(1), true)
 }
 
+fn kitty_internal_cell_size(preset: KittyInternalResPreset) -> (u16, u16) {
+    let (px_w, px_h) = kitty_internal_resolution(preset);
+    let cols = ((u32::from(px_w)) / 2).max(1);
+    let rows = ((u32::from(px_h)) / 4).max(1);
+    let capped_cols = cols.min(u32::from(u16::MAX)) as u16;
+    let capped_rows = rows.min(u32::from(u16::MAX)) as u16;
+    (capped_cols.max(1), capped_rows.max(1))
+}
+
+fn kitty_internal_res_level(preset: KittyInternalResPreset) -> usize {
+    match preset {
+        KittyInternalResPreset::R640x360 => 0,
+        KittyInternalResPreset::R854x480 => 1,
+        KittyInternalResPreset::R1280x720 => 2,
+    }
+}
+
+fn kitty_internal_res_from_level(level: usize) -> KittyInternalResPreset {
+    match level {
+        0 => KittyInternalResPreset::R640x360,
+        1 => KittyInternalResPreset::R854x480,
+        _ => KittyInternalResPreset::R1280x720,
+    }
+}
+
+fn kitty_internal_res_for_lod(
+    base: KittyInternalResPreset,
+    lod_level: usize,
+) -> KittyInternalResPreset {
+    let base_level = kitty_internal_res_level(base);
+    let target_level = base_level.saturating_sub(lod_level.min(2));
+    kitty_internal_res_from_level(target_level)
+}
+
+fn desired_render_cells_for_mode(
+    config: &RenderConfig,
+    display_cells: (u16, u16),
+    graphics_enabled: bool,
+) -> (u16, u16) {
+    if graphics_enabled && matches!(config.output_mode, RenderOutputMode::KittyHq) {
+        let (target_w, target_h) = kitty_internal_cell_size(config.kitty_internal_res);
+        let (target_w, target_h, _) = cap_render_size(target_w, target_h);
+        (target_w.max(1), target_h.max(1))
+    } else {
+        display_cells
+    }
+}
+
+fn resize_runtime_frame(
+    terminal: &mut TerminalSession,
+    frame: &mut FrameBuffers,
+    config: &RenderConfig,
+    display_cells: (u16, u16),
+    graphics_enabled: bool,
+) -> (u16, u16) {
+    let desired = desired_render_cells_for_mode(config, display_cells, graphics_enabled);
+    if frame.width != desired.0 || frame.height != desired.1 {
+        frame.resize(desired.0, desired.1);
+        terminal.force_full_repaint();
+    }
+    desired
+}
+
+fn is_terminal_size_unstable(width: u16, height: u16) -> bool {
+    if width == 0 || height == 0 {
+        return true;
+    }
+    if width == u16::MAX || height == u16::MAX {
+        return true;
+    }
+    // Guard against transient sentinel-like resize values without rejecting legit large terminals.
+    let w = width as u32;
+    let h = height as u32;
+    let max_w = (MAX_RENDER_COLS as u32) * 8;
+    let max_h = (MAX_RENDER_ROWS as u32) * 8;
+    w > max_w || h > max_h
+}
+
 fn resolve_runtime_backend(requested: RenderBackend) -> RenderBackend {
     match requested {
         RenderBackend::Cpu => RenderBackend::Cpu,
@@ -1725,6 +2135,22 @@ fn resolve_runtime_backend(requested: RenderBackend) -> RenderBackend {
     }
 }
 
+fn normalize_graphics_settings(config: &mut RenderConfig) -> Option<String> {
+    if !matches!(
+        config.output_mode,
+        RenderOutputMode::Hybrid | RenderOutputMode::KittyHq
+    ) {
+        return None;
+    }
+    if matches!(config.kitty_transport, KittyTransport::Shm)
+        && matches!(config.kitty_compression, KittyCompression::Zlib)
+    {
+        config.kitty_compression = KittyCompression::None;
+        return Some("kitty transport=shm forces compression=none".to_owned());
+    }
+    None
+}
+
 fn is_retryable_io_error(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
@@ -1743,6 +2169,7 @@ fn install_runtime_panic_hook_once() {
     PANIC_HOOK_ONCE.call_once(|| {
         let default_hook = panic::take_hook();
         panic::set_hook(Box::new(move |panic_info| {
+            cleanup_shm_registry();
             if let Some(lock) = LAST_RUNTIME_STATE.get() {
                 if let Ok(state) = lock.lock() {
                     eprintln!("panic_state: {}", state.as_str());
@@ -1792,16 +2219,18 @@ fn run_scene_interactive(
     camera_settings: RuntimeCameraSettings,
 ) -> Result<()> {
     config.backend = resolve_runtime_backend(config.backend);
+    let startup_graphics_notice = normalize_graphics_settings(&mut config);
     let _truecolor_supported = supports_truecolor();
     let mut terminal = TerminalSession::enter()?;
     terminal.set_present_mode(PresentMode::Diff);
     let (term_width, term_height) = validated_terminal_size(&terminal)?;
-    let (width, height, scaled) = cap_render_size(term_width, term_height);
-    let mut frame = FrameBuffers::new(width, height);
+    let (display_width, display_height, scaled) = cap_render_size(term_width, term_height);
+    let mut display_cells = (display_width, display_height);
+    let mut frame = FrameBuffers::new(display_width, display_height);
     if scaled {
         eprintln!(
             "info: terminal size {}x{} capped to internal render {}x{}",
-            term_width, term_height, width, height
+            term_width, term_height, display_width, display_height
         );
     }
     let mut pipeline = FramePipeline::new(&scene);
@@ -1822,6 +2251,11 @@ fn run_scene_interactive(
     } else {
         1.0
     };
+    let has_stage_mesh = scene
+        .mesh_instances
+        .iter()
+        .any(|instance| matches!(instance.layer, MeshLayer::Stage))
+        && !matches!(config.stage_role, StageRole::Off);
     let mut orbit_state = OrbitState::new(orbit_speed);
     let mut model_spin_enabled = rotates_without_animation;
     let mut user_zoom = 1.0_f32;
@@ -1855,8 +2289,10 @@ fn run_scene_interactive(
     let mut exposure_auto_boost = ExposureAutoBoost::default();
     let base_triangle_stride = config.triangle_stride.max(1);
     let base_min_triangle_area_px2 = config.min_triangle_area_px2.max(0.0);
+    let mut resize_recovery_pending = false;
+    let mut center_lock_restore_after_freefly = center_lock_enabled;
     let mut io_failure_count: u8 = 0;
-    let mut last_osd_notice: Option<String> = None;
+    let mut last_osd_notice: Option<String> = startup_graphics_notice;
     let mut osd_until: Option<Instant> = Some(Instant::now() + Duration::from_secs(2));
     let mut last_render_stats = RenderStats::default();
     let mut effective_aspect_state = resolve_cell_aspect(&config, detect_terminal_cell_aspect());
@@ -1887,30 +2323,52 @@ fn run_scene_interactive(
     );
     let mut active_graphics_protocol = match config.output_mode {
         RenderOutputMode::Text => None,
-        RenderOutputMode::Hybrid | RenderOutputMode::Graphics => {
+        RenderOutputMode::Hybrid | RenderOutputMode::KittyHq => {
             detect_supported_protocol(config.graphics_protocol)
         }
     };
-    if matches!(config.output_mode, RenderOutputMode::Graphics)
-        && active_graphics_protocol.is_none()
+    if matches!(config.output_mode, RenderOutputMode::KittyHq) && active_graphics_protocol.is_none()
     {
-        bail!(
-            "graphics output requested but no supported protocol found (requested {:?})",
-            config.graphics_protocol
-        );
+        last_osd_notice = Some("kitty-hq fallback: text (protocol unsupported)".to_owned());
+        osd_until = Some(Instant::now() + Duration::from_secs(3));
     }
     if matches!(config.output_mode, RenderOutputMode::Hybrid) && active_graphics_protocol.is_none()
     {
         last_osd_notice = Some("hybrid fallback: text (graphics unsupported)".to_owned());
         osd_until = Some(Instant::now() + Duration::from_secs(3));
     }
-    if matches!(config.output_mode, RenderOutputMode::Hybrid)
-        && active_graphics_protocol.is_some()
-        && usize::from(frame.width).saturating_mul(usize::from(frame.height))
+    if matches!(
+        config.output_mode,
+        RenderOutputMode::Hybrid | RenderOutputMode::KittyHq
+    ) && active_graphics_protocol.is_some()
+        && usize::from(display_cells.0).saturating_mul(usize::from(display_cells.1))
             > HYBRID_GRAPHICS_MAX_CELLS
     {
         active_graphics_protocol = None;
-        last_osd_notice = Some("hybrid fallback: text (terminal too large)".to_owned());
+        last_osd_notice = Some("graphics fallback: text (terminal too large)".to_owned());
+        osd_until = Some(Instant::now() + Duration::from_secs(3));
+    }
+    let mut render_cells = resize_runtime_frame(
+        &mut terminal,
+        &mut frame,
+        &config,
+        display_cells,
+        active_graphics_protocol.is_some(),
+    );
+    let kitty_internal_res_base = config.kitty_internal_res;
+    if matches!(
+        config.output_mode,
+        RenderOutputMode::Hybrid | RenderOutputMode::KittyHq
+    ) && active_graphics_protocol.is_some()
+    {
+        terminal.force_full_repaint();
+    }
+    if matches!(config.output_mode, RenderOutputMode::KittyHq) && active_graphics_protocol.is_some()
+    {
+        last_osd_notice = Some(format!(
+            "kitty-hq internal={}x{} display={}x{}",
+            render_cells.0, render_cells.1, display_cells.0, display_cells.1
+        ));
         osd_until = Some(Instant::now() + Duration::from_secs(3));
     }
     let clip_duration = animation_index
@@ -1919,6 +2377,8 @@ fn run_scene_interactive(
         .filter(|duration| *duration > f32::EPSILON);
     let mut continuous_sync_state = ContinuousSyncState::default();
     let mut graphics_slow_streak: u32 = 0;
+    let mut track_lost_streak: u32 = 0;
+    let mut center_drift_streak: u32 = 0;
     if camera_settings.vmd_path.is_some() && loaded_camera_track.is_none() {
         eprintln!("warning: camera VMD could not be loaded. fallback to runtime camera.");
     }
@@ -1929,7 +2389,16 @@ fn run_scene_interactive(
     let start = Instant::now();
     let mut prev_wall_seconds = 0.0_f32;
     let frame_budget = if config.fps_cap == 0 {
-        None
+        if matches!(
+            config.output_mode,
+            RenderOutputMode::Hybrid | RenderOutputMode::KittyHq
+        ) {
+            // Graphics-protocol path is I/O heavy; keep a safety cap even in "unlimited".
+            let target = config.hq_target_fps.clamp(12, 120) as f32;
+            Some(Duration::from_secs_f32(1.0 / target))
+        } else {
+            None
+        }
     } else {
         Some(Duration::from_secs_f32(1.0 / (config.fps_cap as f32)))
     };
@@ -1943,7 +2412,6 @@ fn run_scene_interactive(
     loop {
         let frame_start = Instant::now();
         let input = process_runtime_input(
-            &mut frame,
             &mut orbit_state.enabled,
             &mut orbit_state.speed,
             &mut model_spin_enabled,
@@ -1968,20 +2436,103 @@ fn run_scene_interactive(
         }
         if input.resized {
             terminal.force_full_repaint();
-            center_lock_state.reset();
             distance_clamp_guard.reset();
             screen_fit.on_resize();
             exposure_auto_boost.on_resize();
             last_render_stats = RenderStats::default();
             render_scratch.reset_exposure();
             if input.terminal_size_unstable {
+                resize_recovery_pending = true;
+                center_lock_state.reset();
                 last_osd_notice = Some("resize unstable: waiting for terminal recovery".to_owned());
                 osd_until = Some(Instant::now() + Duration::from_secs(2));
                 thread::sleep(Duration::from_millis(16));
                 continue;
             } else {
-                last_osd_notice = Some(format!("resize: {}x{}", frame.width, frame.height));
-                osd_until = Some(Instant::now() + Duration::from_secs(2));
+                resize_recovery_pending = false;
+                if let Some((tw, th)) = input.resized_terminal {
+                    let (rw, rh, _) = cap_render_size(tw, th);
+                    display_cells = (rw.max(1), rh.max(1));
+                } else if let Ok((tw, th)) = terminal.size() {
+                    let (rw, rh, _) = cap_render_size(tw, th);
+                    display_cells = (rw.max(1), rh.max(1));
+                }
+                if matches!(
+                    config.output_mode,
+                    RenderOutputMode::Hybrid | RenderOutputMode::KittyHq
+                ) && active_graphics_protocol.is_some()
+                    && (display_cells.0 < 72
+                        || display_cells.1 < 20
+                        || usize::from(display_cells.0)
+                            .saturating_mul(usize::from(display_cells.1))
+                            > HYBRID_GRAPHICS_MAX_CELLS)
+                {
+                    active_graphics_protocol = None;
+                    last_osd_notice = Some(
+                        "graphics fallback: text (resize/small terminal safeguard)".to_owned(),
+                    );
+                    osd_until = Some(Instant::now() + Duration::from_secs(3));
+                }
+                render_cells = resize_runtime_frame(
+                    &mut terminal,
+                    &mut frame,
+                    &config,
+                    display_cells,
+                    active_graphics_protocol.is_some(),
+                );
+                if active_graphics_protocol.is_some() {
+                    last_osd_notice = Some(format!(
+                        "resize: display={}x{} render={}x{}",
+                        display_cells.0, display_cells.1, render_cells.0, render_cells.1
+                    ));
+                    osd_until = Some(Instant::now() + Duration::from_secs(2));
+                }
+            }
+        }
+        if resize_recovery_pending {
+            match terminal.size() {
+                Ok((tw, th)) if !is_terminal_size_unstable(tw, th) => {
+                    let (rw, rh, _) = cap_render_size(tw, th);
+                    display_cells = (rw.max(1), rh.max(1));
+                    if matches!(
+                        config.output_mode,
+                        RenderOutputMode::Hybrid | RenderOutputMode::KittyHq
+                    ) && active_graphics_protocol.is_some()
+                        && (display_cells.0 < 72
+                            || display_cells.1 < 20
+                            || usize::from(display_cells.0)
+                                .saturating_mul(usize::from(display_cells.1))
+                                > HYBRID_GRAPHICS_MAX_CELLS)
+                    {
+                        active_graphics_protocol = None;
+                    }
+                    render_cells = resize_runtime_frame(
+                        &mut terminal,
+                        &mut frame,
+                        &config,
+                        display_cells,
+                        active_graphics_protocol.is_some(),
+                    );
+                    distance_clamp_guard.reset();
+                    screen_fit.on_resize();
+                    exposure_auto_boost.on_resize();
+                    render_scratch.reset_exposure();
+                    last_render_stats = RenderStats::default();
+                    resize_recovery_pending = false;
+                    last_osd_notice = Some(format!(
+                        "resize recovered: display={}x{} render={}x{}",
+                        display_cells.0, display_cells.1, render_cells.0, render_cells.1
+                    ));
+                    osd_until = Some(Instant::now() + Duration::from_secs(2));
+                }
+                _ => {
+                    center_lock_state.reset();
+                    last_osd_notice =
+                        Some("resize unstable: waiting for terminal recovery".to_owned());
+                    osd_until = Some(Instant::now() + Duration::from_secs(2));
+                    thread::sleep(Duration::from_millis(16));
+                    continue;
+                }
             }
         }
         if input.status_changed {
@@ -2005,16 +2556,29 @@ fn run_scene_interactive(
         if input.freefly_toggled {
             let entered_freefly = runtime_camera.toggle_freefly(loaded_camera_track.is_some());
             if entered_freefly {
+                center_lock_restore_after_freefly = center_lock_enabled;
                 if center_lock_enabled {
                     center_lock_enabled = false;
                     center_lock_state.reset();
                 }
                 last_osd_notice = Some("freefly on (track paused)".to_owned());
             } else {
+                if center_lock_restore_after_freefly && !center_lock_enabled {
+                    center_lock_enabled = true;
+                    center_lock_state.reset();
+                }
                 last_osd_notice = Some(if runtime_camera.track_enabled {
-                    "freefly off (track resumed)".to_owned()
+                    if center_lock_enabled {
+                        "freefly off (track resumed, center-lock restored)".to_owned()
+                    } else {
+                        "freefly off (track resumed)".to_owned()
+                    }
                 } else {
-                    "freefly off".to_owned()
+                    if center_lock_enabled {
+                        "freefly off (center-lock restored)".to_owned()
+                    } else {
+                        "freefly off".to_owned()
+                    }
                 });
             }
             osd_until = Some(Instant::now() + Duration::from_secs(2));
@@ -2096,6 +2660,22 @@ fn run_scene_interactive(
         let target_aspect = resolve_cell_aspect(&config, detected_cell_aspect);
         effective_aspect_state += (target_aspect - effective_aspect_state) * 0.22;
         let effective_aspect = effective_aspect_state.clamp(0.30, 1.20);
+        if active_graphics_protocol.is_some()
+            && matches!(config.output_mode, RenderOutputMode::KittyHq)
+        {
+            let target_internal =
+                kitty_internal_res_for_lod(kitty_internal_res_base, adaptive_quality.lod_level);
+            if config.kitty_internal_res != target_internal {
+                config.kitty_internal_res = target_internal;
+                render_cells =
+                    resize_runtime_frame(&mut terminal, &mut frame, &config, display_cells, true);
+                last_osd_notice = Some(format!(
+                    "kitty-hq adapt: internal={}x{} (lod={})",
+                    render_cells.0, render_cells.1, adaptive_quality.lod_level
+                ));
+                osd_until = Some(Instant::now() + Duration::from_secs(2));
+            }
+        }
         let mut frame_config = config.clone();
         frame_config.cell_aspect_mode = CellAspectMode::Manual;
         frame_config.cell_aspect = effective_aspect;
@@ -2135,6 +2715,12 @@ fn run_scene_interactive(
             base_min_triangle_area_px2,
             adaptive_quality.lod_level,
         );
+        let prev_subject_height_ratio = if last_render_stats.subject_visible_height_ratio > 0.0 {
+            last_render_stats.subject_visible_height_ratio
+        } else {
+            last_render_stats.visible_height_ratio
+        };
+        apply_distant_subject_clarity_boost(&mut frame_config, prev_subject_height_ratio);
 
         let jitter_scale = jitter_scale_for_lod(adaptive_quality.lod_level);
         let (radius_mul, height_off, focus_y_off, angle_jitter) = update_camera_director(
@@ -2149,30 +2735,19 @@ fn run_scene_interactive(
         );
         let effective_zoom = (user_zoom * screen_fit.auto_zoom_gain).clamp(0.20, 8.0);
         let auto_radius_shrink = auto_radius_guard.shrink_ratio;
-        let mut camera = if matches!(runtime_camera.control_mode, CameraControlMode::FreeFly) {
+        if !center_lock_enabled || matches!(runtime_camera.control_mode, CameraControlMode::FreeFly)
+        {
             center_lock_state.reset();
+        }
+        let mut camera = if matches!(runtime_camera.control_mode, CameraControlMode::FreeFly) {
             freefly_camera(freefly_state)
         } else {
-            let dynamic_center_offset = if center_lock_enabled {
-                center_lock_state.update(
-                    &last_render_stats,
-                    center_lock_mode,
-                    frame.width,
-                    frame.height,
-                    framing.radius * effective_zoom * radius_mul,
-                    extent_y,
-                )
-            } else {
-                center_lock_state.reset();
-                Vec3::ZERO
-            };
             orbit_camera(
                 orbit_state.angle + angle_jitter,
                 (framing.radius * effective_zoom * radius_mul * (1.0 - auto_radius_shrink))
                     .clamp(0.2, 1000.0),
                 (framing.camera_height + camera_height_offset + height_off).clamp(-1000.0, 1000.0),
                 framing.focus
-                    + dynamic_center_offset
                     + if center_lock_enabled {
                         Vec3::ZERO
                     } else {
@@ -2228,8 +2803,23 @@ fn run_scene_interactive(
         } else {
             framing.focus
         };
+        if center_lock_enabled && !matches!(runtime_camera.control_mode, CameraControlMode::FreeFly)
+        {
+            center_lock_state.apply_camera_space(
+                &last_render_stats,
+                center_lock_mode,
+                frame.width,
+                frame.height,
+                &mut camera,
+                frame_config.fov_deg,
+                frame_config.cell_aspect,
+                extent_y,
+            );
+        }
         let min_dist = distance_clamp_guard.apply(&mut camera, subject_target, extent_y, 0.35);
-        let (dyn_near, dyn_far) = dynamic_clip_planes(min_dist, extent_y);
+        let camera_dist = (camera.eye - subject_target).length().max(min_dist);
+        let (dyn_near, dyn_far) =
+            dynamic_clip_planes(min_dist, extent_y, camera_dist, has_stage_mesh);
         frame_config.near = dyn_near;
         frame_config.far = dyn_far;
 
@@ -2256,6 +2846,55 @@ fn run_scene_interactive(
         } else {
             stats.visible_cell_ratio
         };
+        if runtime_camera.track_enabled {
+            if subject_visible_ratio < 0.0015 {
+                track_lost_streak = track_lost_streak.saturating_add(1);
+            } else {
+                track_lost_streak = 0;
+            }
+            let centroid = stats.subject_centroid_px.or(stats.visible_centroid_px);
+            if center_lock_enabled {
+                if let Some((cx, cy)) = centroid {
+                    let fw = f32::from(frame.width.max(1));
+                    let fh = f32::from(frame.height.max(1));
+                    let nx = ((cx / fw - 0.5) * 2.0).clamp(-2.0, 2.0);
+                    let ny = ((cy / fh - 0.5) * 2.0).clamp(-2.0, 2.0);
+                    if nx.abs() > 0.55 || ny.abs() > 0.55 {
+                        center_drift_streak = center_drift_streak.saturating_add(1);
+                    } else {
+                        center_drift_streak = 0;
+                    }
+                } else {
+                    center_drift_streak = center_drift_streak.saturating_add(1);
+                }
+            } else {
+                center_drift_streak = 0;
+            }
+            if center_drift_streak >= 18 {
+                runtime_camera.track_enabled = false;
+                center_drift_streak = 0;
+                track_lost_streak = 0;
+                center_lock_state.reset();
+                last_osd_notice = Some(
+                    "camera track drifted off-center: fallback orbit (toggle f to retry)"
+                        .to_owned(),
+                );
+                osd_until = Some(Instant::now() + Duration::from_secs(3));
+            }
+            if track_lost_streak >= 24 {
+                runtime_camera.track_enabled = false;
+                track_lost_streak = 0;
+                center_drift_streak = 0;
+                center_lock_state.reset();
+                last_osd_notice = Some(
+                    "camera track lost subject: fallback orbit (toggle f to retry)".to_owned(),
+                );
+                osd_until = Some(Instant::now() + Duration::from_secs(3));
+            }
+        } else {
+            track_lost_streak = 0;
+            center_drift_streak = 0;
+        }
         auto_radius_guard.update(
             subject_height_ratio,
             center_lock_enabled && matches!(braille_profile, BrailleProfile::Safe),
@@ -2312,9 +2951,30 @@ fn run_scene_interactive(
             overlay_osd(&mut frame, &status);
         }
 
+        if active_graphics_protocol.is_some()
+            && usize::from(display_cells.0).saturating_mul(usize::from(display_cells.1))
+                > HYBRID_GRAPHICS_MAX_CELLS
+        {
+            active_graphics_protocol = None;
+            resize_runtime_frame(&mut terminal, &mut frame, &config, display_cells, false);
+            terminal.force_full_repaint();
+            last_osd_notice = Some("graphics fallback: text (terminal too large)".to_owned());
+            osd_until = Some(Instant::now() + Duration::from_secs(3));
+        }
+
         let present_started = Instant::now();
         let present_result = if let Some(protocol) = active_graphics_protocol {
-            terminal.present_graphics(&frame, protocol)
+            terminal.present_graphics(
+                &frame,
+                protocol,
+                frame_config.kitty_transport,
+                frame_config.kitty_compression,
+                frame_config.kitty_pipeline_mode,
+                frame_config.recover_strategy,
+                frame_config.kitty_scale,
+                display_cells,
+                input.resized || resize_recovery_pending,
+            )
         } else if matches!(frame_config.color_mode, ColorMode::Ansi) {
             terminal.present(&frame, true, ansi_quantization)
         } else {
@@ -2322,8 +2982,12 @@ fn run_scene_interactive(
         };
         if let Err(err) = present_result {
             if active_graphics_protocol.is_some() {
-                if matches!(config.output_mode, RenderOutputMode::Hybrid) {
+                if matches!(
+                    config.output_mode,
+                    RenderOutputMode::Hybrid | RenderOutputMode::KittyHq
+                ) {
                     active_graphics_protocol = None;
+                    resize_runtime_frame(&mut terminal, &mut frame, &config, display_cells, false);
                     terminal.force_full_repaint();
                     last_osd_notice = Some("graphics fallback: text".to_owned());
                     osd_until = Some(Instant::now() + Duration::from_secs(3));
@@ -2379,13 +3043,16 @@ fn run_scene_interactive(
             } else {
                 graphics_slow_streak = graphics_slow_streak.saturating_sub(1);
             }
-            if matches!(config.output_mode, RenderOutputMode::Hybrid)
-                && graphics_slow_streak >= HYBRID_GRAPHICS_SLOW_STREAK_LIMIT
+            if matches!(
+                config.output_mode,
+                RenderOutputMode::Hybrid | RenderOutputMode::KittyHq
+            ) && graphics_slow_streak >= HYBRID_GRAPHICS_SLOW_STREAK_LIMIT
             {
                 active_graphics_protocol = None;
                 graphics_slow_streak = 0;
+                resize_runtime_frame(&mut terminal, &mut frame, &config, display_cells, false);
                 terminal.force_full_repaint();
-                last_osd_notice = Some(format!("hybrid fallback: text ({present_ms:.1}ms)"));
+                last_osd_notice = Some(format!("graphics fallback: text ({present_ms:.1}ms)"));
                 osd_until = Some(Instant::now() + Duration::from_secs(3));
                 continue;
             }
@@ -2428,6 +3095,7 @@ fn run_scene_interactive(
             }
         }
     }
+    cleanup_shm_registry();
     Ok(())
 }
 
@@ -2668,6 +3336,25 @@ fn render_config_from_run(args: &RunArgs, visual: &ResolvedVisualOptions) -> Ren
         mode,
         output_mode: visual.output_mode,
         graphics_protocol: visual.graphics_protocol,
+        kitty_transport: visual.kitty_transport,
+        kitty_compression: visual.kitty_compression,
+        kitty_internal_res: visual.kitty_internal_res,
+        kitty_pipeline_mode: visual.kitty_pipeline_mode,
+        recover_strategy: visual.recover_strategy,
+        kitty_scale: visual.kitty_scale,
+        hq_target_fps: visual.hq_target_fps,
+        subject_exposure_only: visual.subject_exposure_only,
+        subject_target_height_ratio: visual.subject_target_height_ratio,
+        subject_target_width_ratio: visual.subject_target_width_ratio,
+        quality_auto_distance: visual.quality_auto_distance,
+        texture_mip_bias: visual.texture_mip_bias,
+        stage_as_sub_only: visual.stage_as_sub_only,
+        stage_role: if visual.stage_as_sub_only {
+            StageRole::Sub
+        } else {
+            visual.stage_role
+        },
+        stage_luma_cap: visual.stage_luma_cap,
         recover_color_auto: visual.recover_color_auto,
         perf_profile: visual.perf_profile,
         detail_profile: visual.detail_profile,
@@ -2688,6 +3375,8 @@ fn render_config_from_run(args: &RunArgs, visual: &ResolvedVisualOptions) -> Ren
         stage_reactive: visual.stage_reactive,
         material_color: visual.material_color,
         texture_sampling: visual.texture_sampling,
+        texture_v_origin: visual.texture_v_origin,
+        texture_sampler: visual.texture_sampler,
         clarity_profile: visual.clarity_profile,
         ansi_quantization: visual.ansi_quantization,
         model_lift: visual.model_lift,
@@ -2734,6 +3423,25 @@ fn render_config_from_start(args: &StartArgs, visual: &ResolvedVisualOptions) ->
         mode,
         output_mode: visual.output_mode,
         graphics_protocol: visual.graphics_protocol,
+        kitty_transport: visual.kitty_transport,
+        kitty_compression: visual.kitty_compression,
+        kitty_internal_res: visual.kitty_internal_res,
+        kitty_pipeline_mode: visual.kitty_pipeline_mode,
+        recover_strategy: visual.recover_strategy,
+        kitty_scale: visual.kitty_scale,
+        hq_target_fps: visual.hq_target_fps,
+        subject_exposure_only: visual.subject_exposure_only,
+        subject_target_height_ratio: visual.subject_target_height_ratio,
+        subject_target_width_ratio: visual.subject_target_width_ratio,
+        quality_auto_distance: visual.quality_auto_distance,
+        texture_mip_bias: visual.texture_mip_bias,
+        stage_as_sub_only: visual.stage_as_sub_only,
+        stage_role: if visual.stage_as_sub_only {
+            StageRole::Sub
+        } else {
+            visual.stage_role
+        },
+        stage_luma_cap: visual.stage_luma_cap,
         recover_color_auto: visual.recover_color_auto,
         perf_profile: visual.perf_profile,
         detail_profile: visual.detail_profile,
@@ -2754,6 +3462,8 @@ fn render_config_from_start(args: &StartArgs, visual: &ResolvedVisualOptions) ->
         stage_reactive: visual.stage_reactive,
         material_color: visual.material_color,
         texture_sampling: visual.texture_sampling,
+        texture_v_origin: visual.texture_v_origin,
+        texture_sampler: visual.texture_sampler,
         clarity_profile: visual.clarity_profile,
         ansi_quantization: visual.ansi_quantization,
         model_lift: visual.model_lift,
@@ -3207,19 +3917,21 @@ fn merge_scenes(mut base: SceneCpu, mut overlay: SceneCpu) -> SceneCpu {
 
 fn validated_terminal_size(terminal: &TerminalSession) -> Result<(u16, u16)> {
     let (w, h) = terminal.size()?;
-    if w > 0 && h > 0 {
+    if !is_terminal_size_unstable(w, h) {
         return Ok((w, h));
     }
     let env_w = std::env::var("COLUMNS")
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
-        .filter(|v| *v > 0);
+        .filter(|v| *v > 0 && *v < u16::MAX);
     let env_h = std::env::var("LINES")
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
-        .filter(|v| *v > 0);
+        .filter(|v| *v > 0 && *v < u16::MAX);
     match (env_w, env_h) {
-        (Some(width), Some(height)) => Ok((width, height)),
+        (Some(width), Some(height)) if !is_terminal_size_unstable(width, height) => {
+            Ok((width, height))
+        }
         _ => bail!(
             "terminal size unavailable (got {w}x{h}). set COLUMNS/LINES or use a real TTY terminal"
         ),
@@ -3554,7 +4266,6 @@ fn overlay_osd(frame: &mut FrameBuffers, text: &str) {
 }
 
 fn process_runtime_input(
-    frame: &mut FrameBuffers,
     orbit_enabled: &mut bool,
     orbit_speed: &mut f32,
     model_spin_enabled: &mut bool,
@@ -3889,12 +4600,12 @@ fn process_runtime_input(
                 _ => {}
             },
             Event::Resize(width, height) => {
-                let cells = (width as u32).saturating_mul(height as u32);
-                if width == 0 || height == 0 || cells >= u16::MAX as u32 {
+                if is_terminal_size_unstable(width, height) {
                     result.terminal_size_unstable = true;
+                    result.resized_terminal = None;
                 } else {
-                    let (rw, rh, _) = cap_render_size(width, height);
-                    frame.resize(rw.max(1), rh.max(1));
+                    result.terminal_size_unstable = false;
+                    result.resized_terminal = Some((width, height));
                 }
                 result.status_changed = true;
                 result.resized = true;
@@ -3924,6 +4635,25 @@ fn bench(args: BenchArgs) -> Result<()> {
         mode,
         output_mode: visual.output_mode,
         graphics_protocol: visual.graphics_protocol,
+        kitty_transport: visual.kitty_transport,
+        kitty_compression: visual.kitty_compression,
+        kitty_internal_res: visual.kitty_internal_res,
+        kitty_pipeline_mode: visual.kitty_pipeline_mode,
+        recover_strategy: visual.recover_strategy,
+        kitty_scale: visual.kitty_scale,
+        hq_target_fps: visual.hq_target_fps,
+        subject_exposure_only: visual.subject_exposure_only,
+        subject_target_height_ratio: visual.subject_target_height_ratio,
+        subject_target_width_ratio: visual.subject_target_width_ratio,
+        quality_auto_distance: visual.quality_auto_distance,
+        texture_mip_bias: visual.texture_mip_bias,
+        stage_as_sub_only: visual.stage_as_sub_only,
+        stage_role: if visual.stage_as_sub_only {
+            StageRole::Sub
+        } else {
+            visual.stage_role
+        },
+        stage_luma_cap: visual.stage_luma_cap,
         recover_color_auto: visual.recover_color_auto,
         perf_profile: visual.perf_profile,
         detail_profile: visual.detail_profile,
@@ -3944,6 +4674,8 @@ fn bench(args: BenchArgs) -> Result<()> {
         stage_reactive: visual.stage_reactive,
         material_color: visual.material_color,
         texture_sampling: visual.texture_sampling,
+        texture_v_origin: visual.texture_v_origin,
+        texture_sampler: visual.texture_sampler,
         clarity_profile: visual.clarity_profile,
         ansi_quantization: visual.ansi_quantization,
         model_lift: visual.model_lift,
@@ -4097,10 +4829,95 @@ fn inspect(args: InspectArgs) -> Result<()> {
     println!("meshes: {}", scene.meshes.len());
     println!("mesh_instances: {}", scene.mesh_instances.len());
     println!("nodes: {}", scene.nodes.len());
+    if let Some(root_idx) = scene.root_center_node {
+        let root_name = scene
+            .nodes
+            .get(root_idx)
+            .and_then(|node| node.name.as_deref())
+            .unwrap_or("<unnamed>");
+        println!("root_center_node: {} ({})", root_idx, root_name);
+    } else {
+        println!("root_center_node: none");
+    }
     println!("skins: {}", scene.skins.len());
     println!("materials: {}", scene.materials.len());
     println!("textures: {}", scene.textures.len());
     println!("animations: {}", scene.animations.len());
+    let mut texture_format_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut texture_color_space_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for texture in &scene.textures {
+        *texture_format_counts
+            .entry(texture.source_format.clone())
+            .or_insert(0) += 1;
+        let key = match texture.color_space {
+            crate::scene::TextureColorSpace::Srgb => "sRGB",
+            crate::scene::TextureColorSpace::Linear => "Linear",
+        };
+        *texture_color_space_counts.entry(key).or_insert(0) += 1;
+    }
+    let mut base_color_sampler_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for material in &scene.materials {
+        let key = format!(
+            "wrap=({:?},{:?}) filter=({:?},{:?})",
+            material.base_color_wrap_s,
+            material.base_color_wrap_t,
+            material.base_color_min_filter,
+            material.base_color_mag_filter
+        );
+        *base_color_sampler_counts.entry(key).or_insert(0) += 1;
+    }
+    println!(
+        "texture_formats: {}",
+        if texture_format_counts.is_empty() {
+            "{}".to_owned()
+        } else {
+            format!("{texture_format_counts:?}")
+        }
+    );
+    println!(
+        "texture_color_spaces: {}",
+        if texture_color_space_counts.is_empty() {
+            "{}".to_owned()
+        } else {
+            format!("{texture_color_space_counts:?}")
+        }
+    );
+    println!(
+        "base_color_sampler_distribution: {}",
+        if base_color_sampler_counts.is_empty() {
+            "{}".to_owned()
+        } else {
+            format!("{base_color_sampler_counts:?}")
+        }
+    );
+    for (index, texture) in scene.textures.iter().enumerate() {
+        let color_space = match texture.color_space {
+            crate::scene::TextureColorSpace::Srgb => "sRGB",
+            crate::scene::TextureColorSpace::Linear => "Linear",
+        };
+        println!(
+            "texture[{index}]: {}x{} format={} color_space={} mips={}",
+            texture.width,
+            texture.height,
+            texture.source_format,
+            color_space,
+            texture.mip_levels.len()
+        );
+    }
+    for (index, material) in scene.materials.iter().enumerate() {
+        println!(
+            "material[{index}]: base_tex={:?} texcoord={} wrap=({:?},{:?}) filter=({:?},{:?}) alpha={:?} cutoff={:.3} double_sided={}",
+            material.base_color_texture,
+            material.base_color_tex_coord,
+            material.base_color_wrap_s,
+            material.base_color_wrap_t,
+            material.base_color_min_filter,
+            material.base_color_mag_filter,
+            material.alpha_mode,
+            material.alpha_cutoff,
+            material.double_sided
+        );
+    }
     let total_morph_targets: usize = scene
         .meshes
         .iter()
@@ -4510,6 +5327,65 @@ mod tests {
     }
 
     #[test]
+    fn camera_mode_is_promoted_when_vmd_source_exists() {
+        assert!(matches!(
+            resolve_effective_camera_mode(CameraMode::Off, true),
+            CameraMode::Vmd
+        ));
+        assert!(matches!(
+            resolve_effective_camera_mode(CameraMode::Blend, true),
+            CameraMode::Blend
+        ));
+        assert!(matches!(
+            resolve_effective_camera_mode(CameraMode::Off, false),
+            CameraMode::Off
+        ));
+    }
+
+    #[test]
+    fn runtime_camera_starts_in_orbit_when_track_is_available() {
+        let state = RuntimeCameraState::new(CameraControlMode::FreeFly, CameraMode::Vmd, true);
+        assert!(matches!(state.control_mode, CameraControlMode::Orbit));
+        assert!(state.track_enabled);
+    }
+
+    #[test]
+    fn distant_subject_clarity_boost_strengthens_subject_visibility() {
+        let mut cfg = RenderConfig::default();
+        cfg.model_lift = 0.10;
+        cfg.edge_accent_strength = 0.20;
+        cfg.bg_suppression = 0.20;
+        cfg.triangle_stride = 3;
+        cfg.min_triangle_area_px2 = 0.8;
+        apply_distant_subject_clarity_boost(&mut cfg, 0.10);
+        assert!(cfg.model_lift > 0.10);
+        assert!(cfg.edge_accent_strength > 0.20);
+        assert!(cfg.bg_suppression > 0.20);
+        assert!(cfg.triangle_stride < 3);
+        assert!(cfg.min_triangle_area_px2 < 0.8);
+    }
+
+    #[test]
+    fn center_lock_camera_space_moves_camera_when_anchor_is_offcenter() {
+        let mut state = CenterLockState::default();
+        let mut stats = RenderStats::default();
+        stats.subject_centroid_px = Some((10.0, 20.0));
+        let mut camera = Camera::default();
+        let before = camera.eye;
+        state.apply_camera_space(
+            &stats,
+            CenterLockMode::Root,
+            120,
+            40,
+            &mut camera,
+            60.0,
+            0.5,
+            2.0,
+        );
+        assert!((camera.eye - before).length() > 1e-6);
+    }
+
+    #[test]
     fn screen_fit_controller_uses_mode_specific_targets() {
         let mut controller = ScreenFitController::default();
         controller.update(0.40, RenderMode::Ascii, true);
@@ -4584,6 +5460,16 @@ mod tests {
         assert!(scaled);
         assert!(w <= MAX_RENDER_COLS);
         assert!(h <= MAX_RENDER_ROWS);
+    }
+
+    #[test]
+    fn terminal_size_unstable_only_for_invalid_or_sentinel_values() {
+        assert!(is_terminal_size_unstable(0, 40));
+        assert!(is_terminal_size_unstable(120, 0));
+        assert!(is_terminal_size_unstable(u16::MAX, 40));
+        assert!(is_terminal_size_unstable(120, u16::MAX));
+        assert!(!is_terminal_size_unstable(432, 102));
+        assert!(!is_terminal_size_unstable(900, 140));
     }
 
     #[test]
@@ -4678,10 +5564,17 @@ mod tests {
 
     #[test]
     fn dynamic_clip_planes_remain_valid() {
-        let (near, far) = dynamic_clip_planes(0.6, 1.4);
+        let (near, far) = dynamic_clip_planes(0.6, 1.4, 2.0, false);
         assert!(near > 0.0);
         assert!(far > near);
-        assert!(near <= 0.08);
-        assert!(far <= 300.0);
+        assert!(near <= 0.10);
+        assert!(far <= 500.0);
+    }
+
+    #[test]
+    fn dynamic_clip_planes_expand_far_for_stage() {
+        let (_, far_no_stage) = dynamic_clip_planes(0.6, 1.4, 2.0, false);
+        let (_, far_with_stage) = dynamic_clip_planes(0.6, 1.4, 8.0, true);
+        assert!(far_with_stage > far_no_stage);
     }
 }

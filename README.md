@@ -17,7 +17,7 @@ CPU-first terminal renderer for 3D meshes/animations (ASCII/Braille) with option
 - 자동 셀 비율 추정 + 비율 캘리브레이션
 - 해상도 적응형 대비/안개 보정 (폰트 확대 시 가시성 강화)
 - 출력 경로 최적화(Diff presenter + synchronized update)
-- 하이브리드 출력(`text` + `graphics-protocol(auto/kitty/iTerm2)`) + 자동 폴백
+- Kitty HQ 출력(`kitty-hq`, shm/direct) + text/hybrid 자동 폴백
 - 저강도 그라데이션 배경(LOD에 따라 full/reduced/minimal)
 - Braille 2x4 서브픽셀 합성 + safe 가시성 보정
 - ANSI truecolor 하이브리드(테마 기반) + mono fallback
@@ -48,6 +48,7 @@ cargo run -- run --scene glb --glb /path/to/model.glb --output-mode hybrid --gra
 cargo run -- run --scene glb --glb /path/to/model.glb --wasd-mode freefly --freefly-speed 1.2 --camera-look-speed 1.2
 cargo run --features gpu -- run --scene glb --glb /path/to/model.glb --mode braille --color-mode ansi --braille-profile normal --theme neon --perf-profile smooth --backend gpu
 cargo run -- preprocess --glb assets/glb/miku.glb --out assets/glb/miku_up2.glb --upscale-factor 2 --upscale-sharpen 0.20
+cargo run -- preprocess --preset web-parity --glb assets/glb/miku.glb --out assets/glb/miku_web.glb
 cargo run -- run --scene obj --obj /path/to/model.obj --mode ascii --fps-cap 30
 cargo run -- inspect --glb /path/to/model.glb
 cargo run -- preview --glb /path/to/model.glb --anim 0 --camera-vmd assets/camera/world_is_mine.vmd --camera-mode blend --camera-align-preset alt-a --camera-unit-scale 0.08 --port 8787
@@ -125,6 +126,8 @@ cargo run -- bench --scene glb-anim --glb /path/to/model.glb --anim 0 --seconds 
 - `camera_focus = auto|full|upper|face|hands`
 - `material_color = true|false`
 - `texture_sampling = nearest|bilinear`
+- `texture_v_origin = gltf|legacy`
+- `texture_sampler = gltf|override`
 - `braille_aspect_compensation = 0.70..1.30`
 - `model_lift = 0.02..0.45`
 - `edge_accent_strength = 0.0..1.5`
@@ -136,8 +139,16 @@ cargo run -- bench --scene glb-anim --glb /path/to/model.glb --anim 0 --seconds 
 - `sync_policy = continuous|fixed|manual`
 - `sync_hard_snap_ms = 10..2000`
 - `sync_kp = 0.01..1.0`
-- `output_mode = text|hybrid|graphics`
+- `output_mode = text|hybrid|kitty-hq` (기본 `text`)
 - `graphics_protocol = auto|kitty|iterm2|none`
+- `kitty_transport = shm|direct`
+- `kitty_compression = none|zlib` (`shm`이면 `none` 강제)
+- `kitty_internal_res = 640x360|854x480|1280x720`
+- `kitty_scale = 0.5..2.0`
+- `hq_target_fps = 12..120`
+- `subject_exposure_only = true|false`
+- `stage_role = sub|off`
+- `stage_luma_cap = 0.0..1.0`
 - `recover_color = auto|off`
 - `upscale_factor = 1|2|4` (`preprocess` 기본값)
 - `upscale_sharpen = 0.0..2.0` (`preprocess` 기본값)
@@ -171,6 +182,14 @@ sync_kp = 0.15
 output_mode = text
 recover_color = auto
 graphics_protocol = auto
+kitty_transport = shm
+kitty_compression = none
+kitty_internal_res = 640x360
+kitty_scale = 1.00
+hq_target_fps = 24
+subject_exposure_only = true
+stage_role = sub
+stage_luma_cap = 0.35
 upscale_factor = 2
 upscale_sharpen = 0.20
 color_mode = ansi
@@ -203,6 +222,8 @@ camera_vmd_path = assets/camera/world_is_mine.vmd
 camera_focus = auto
 material_color = true
 texture_sampling = nearest
+texture_v_origin = gltf
+texture_sampler = gltf
 braille_aspect_compensation = 1.00
 model_lift = 0.12
 edge_accent_strength = 0.32
@@ -258,7 +279,7 @@ min_triangle_area_px2 = 0.08
 ## Web Preview
 
 - `preview` 명령은 로컬 Three.js 비교 경로를 띄웁니다.
-- `output_mode=hybrid`는 지원 터미널이면 그래픽 프로토콜을 사용하고, 실패 시 즉시 텍스트 경로로 전환합니다.
+- `output_mode=kitty-hq|hybrid`는 지원 터미널이면 그래픽 프로토콜을 사용하고, 실패 시 즉시 텍스트 경로로 전환합니다.
 - 기본 주소: `http://127.0.0.1:8787`
 - 동기화 채널:
   - WebSocket `/sync` 20Hz 마스터 클럭 브로드캐스트

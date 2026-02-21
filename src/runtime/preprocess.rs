@@ -10,7 +10,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use image::{DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Rgba, RgbaImage, imageops};
 use serde_json::Value;
 
-use crate::runtime::cli::PreprocessArgs;
+use crate::runtime::cli::{PreprocessArgs, PreprocessPresetArg};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImageColorSpace {
@@ -32,14 +32,19 @@ struct PreprocessReport {
 }
 
 pub fn run_preprocess(args: &PreprocessArgs) -> Result<()> {
-    let factor = match args.upscale_factor {
+    let mut factor = match args.upscale_factor {
         1 | 2 | 4 => args.upscale_factor,
         _ => bail!(
             "unsupported --upscale-factor {} (allowed: 1,2,4)",
             args.upscale_factor
         ),
     };
-    let sharpen = args.upscale_sharpen.clamp(0.0, 2.0);
+    let mut sharpen = args.upscale_sharpen.clamp(0.0, 2.0);
+    if matches!(args.preset, PreprocessPresetArg::WebParity) && factor == 2 {
+        // Keep authored texture intent by default in web-parity mode.
+        factor = 1;
+        sharpen = 0.0;
+    }
     if !args.glb.exists() {
         bail!("input file not found: {}", args.glb.display());
     }
@@ -124,6 +129,7 @@ pub fn run_preprocess(args: &PreprocessArgs) -> Result<()> {
 
     println!("preprocess input: {}", args.glb.display());
     println!("preprocess output: {}", args.out.display());
+    println!("preset: {:?}", args.preset);
     println!("images_total: {}", report.images_total);
     println!("images_upscaled: {}", report.images_upscaled);
     println!("images_failed: {}", report.images_failed);

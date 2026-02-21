@@ -14,7 +14,7 @@ pub enum RenderMode {
 pub enum RenderOutputMode {
     Text,
     Hybrid,
-    Graphics,
+    KittyHq,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,44 @@ pub enum GraphicsProtocol {
     Kitty,
     Iterm2,
     None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KittyTransport {
+    Shm,
+    Direct,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KittyCompression {
+    None,
+    Zlib,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KittyInternalResPreset {
+    R640x360,
+    R854x480,
+    R1280x720,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KittyPipelineMode {
+    RealPixel,
+    GlyphCompat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoverStrategy {
+    Hard,
+    Soft,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageRole {
+    Sub,
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +170,37 @@ pub enum TextureSamplingMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureVOrigin {
+    Gltf,
+    Legacy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureSamplerMode {
+    Gltf,
+    Override,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureColorSpace {
+    Srgb,
+    Linear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureWrapMode {
+    Repeat,
+    MirroredRepeat,
+    ClampToEdge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureFilterMode {
+    Nearest,
+    Linear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraMode {
     Off,
     Vmd,
@@ -175,6 +244,21 @@ pub struct RenderConfig {
     pub mode: RenderMode,
     pub output_mode: RenderOutputMode,
     pub graphics_protocol: GraphicsProtocol,
+    pub kitty_transport: KittyTransport,
+    pub kitty_compression: KittyCompression,
+    pub kitty_internal_res: KittyInternalResPreset,
+    pub kitty_pipeline_mode: KittyPipelineMode,
+    pub recover_strategy: RecoverStrategy,
+    pub kitty_scale: f32,
+    pub hq_target_fps: u32,
+    pub subject_exposure_only: bool,
+    pub subject_target_height_ratio: f32,
+    pub subject_target_width_ratio: f32,
+    pub quality_auto_distance: bool,
+    pub texture_mip_bias: f32,
+    pub stage_as_sub_only: bool,
+    pub stage_role: StageRole,
+    pub stage_luma_cap: f32,
     pub recover_color_auto: bool,
     pub perf_profile: PerfProfile,
     pub detail_profile: DetailProfile,
@@ -195,6 +279,8 @@ pub struct RenderConfig {
     pub stage_reactive: bool,
     pub material_color: bool,
     pub texture_sampling: TextureSamplingMode,
+    pub texture_v_origin: TextureVOrigin,
+    pub texture_sampler: TextureSamplerMode,
     pub clarity_profile: ClarityProfile,
     pub ansi_quantization: AnsiQuantization,
     pub model_lift: f32,
@@ -233,6 +319,21 @@ impl Default for RenderConfig {
             mode: RenderMode::Ascii,
             output_mode: RenderOutputMode::Text,
             graphics_protocol: GraphicsProtocol::Auto,
+            kitty_transport: KittyTransport::Shm,
+            kitty_compression: KittyCompression::None,
+            kitty_internal_res: KittyInternalResPreset::R640x360,
+            kitty_pipeline_mode: KittyPipelineMode::RealPixel,
+            recover_strategy: RecoverStrategy::Hard,
+            kitty_scale: 1.0,
+            hq_target_fps: 24,
+            subject_exposure_only: true,
+            subject_target_height_ratio: 0.66,
+            subject_target_width_ratio: 0.42,
+            quality_auto_distance: true,
+            texture_mip_bias: 0.0,
+            stage_as_sub_only: true,
+            stage_role: StageRole::Sub,
+            stage_luma_cap: 0.35,
             recover_color_auto: true,
             perf_profile: PerfProfile::Balanced,
             detail_profile: DetailProfile::Balanced,
@@ -253,6 +354,8 @@ impl Default for RenderConfig {
             stage_reactive: true,
             material_color: true,
             texture_sampling: TextureSamplingMode::Nearest,
+            texture_v_origin: TextureVOrigin::Gltf,
+            texture_sampler: TextureSamplerMode::Gltf,
             clarity_profile: ClarityProfile::Sharp,
             ansi_quantization: AnsiQuantization::Q216,
             model_lift: 0.12,
@@ -281,6 +384,14 @@ impl Default for RenderConfig {
             triangle_stride: 1,
             min_triangle_area_px2: 0.0,
         }
+    }
+}
+
+pub fn kitty_internal_resolution(preset: KittyInternalResPreset) -> (u16, u16) {
+    match preset {
+        KittyInternalResPreset::R640x360 => (640, 360),
+        KittyInternalResPreset::R854x480 => (854, 480),
+        KittyInternalResPreset::R1280x720 => (1280, 720),
     }
 }
 
@@ -368,6 +479,10 @@ pub struct MaterialCpu {
     pub base_color_texture: Option<usize>,
     pub base_color_tex_coord: u32,
     pub base_color_uv_transform: Option<UvTransform2D>,
+    pub base_color_wrap_s: TextureWrapMode,
+    pub base_color_wrap_t: TextureWrapMode,
+    pub base_color_min_filter: TextureFilterMode,
+    pub base_color_mag_filter: TextureFilterMode,
     pub emissive_factor: [f32; 3],
     pub alpha_mode: MaterialAlphaMode,
     pub alpha_cutoff: f32,
@@ -375,10 +490,20 @@ pub struct MaterialCpu {
 }
 
 #[derive(Debug, Clone)]
+pub struct TextureLevelCpu {
+    pub width: u32,
+    pub height: u32,
+    pub rgba8: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
 pub struct TextureCpu {
     pub width: u32,
     pub height: u32,
     pub rgba8: Vec<u8>,
+    pub source_format: String,
+    pub color_space: TextureColorSpace,
+    pub mip_levels: Vec<TextureLevelCpu>,
 }
 
 #[derive(Debug, Clone)]

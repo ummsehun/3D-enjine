@@ -31,6 +31,7 @@ const EMBED_INDEX_HTML: &str = r#"<!doctype html>
   <div id="app"></div>
   <div id="hud">loading...</div>
   <div id="err"></div>
+  <a id="probe-link" href="/mmd-probe" style="position:fixed;right:12px;top:12px;color:#93c5fd;text-decoration:none;background:rgba(0,0,0,.45);padding:7px 10px;border-radius:8px;font-size:12px">MMD probe</a>
   <script type="module" src="/app.js"></script>
 </body>
 </html>
@@ -93,7 +94,7 @@ async function init() {
     actions = gltf.animations.map(clip => mixer.clipAction(clip));
     playAnimation(state.anim_selector ?? 0);
   }
-  hud.textContent = `preview | mode=${state.camera_mode} | glb=${state.glb_name}`;
+  hud.textContent = `preview | mode=${state.camera_mode} | glb=${state.glb_name} | profile=${state.sync_profile_hit ? 'hit' : 'miss'} | offset=${state.sync_offset_ms ?? 0}ms`;
 }
 
 let sync = { master_sec: 0, speed_factor: 1.0, sync_offset_ms: 0, playing: true, seq: 0 };
@@ -153,7 +154,11 @@ function tick() {
     mixer.update(dt * speed);
   }
   const staleMs = performance.now() - lastSyncAt;
-  hud.textContent = `preview | mode=${state?.camera_mode ?? 'n/a'} | t=${localClockSec.toFixed(3)} | sync_seq=${sync.seq} | stale=${staleMs.toFixed(0)}ms`;
+  const profile = state?.sync_profile_hit ? 'hit' : 'miss';
+  const profileKey = state?.sync_profile_key || 'none';
+  const drift = Number.isFinite(state?.sync_drift_ema) ? state.sync_drift_ema.toFixed(4) : '0.0000';
+  const snaps = Number.isFinite(state?.sync_hard_snap_count) ? state.sync_hard_snap_count : 0;
+  hud.textContent = `preview | mode=${state?.camera_mode ?? 'n/a'} | t=${localClockSec.toFixed(3)} | sync_seq=${sync.seq} | stale=${staleMs.toFixed(0)}ms | profile=${profile} | drift=${drift} | snaps=${snaps} | key=${profileKey}`;
   renderer.render(scene, camera);
 }
 
@@ -161,6 +166,58 @@ init().then(() => {
   connectSyncSocket();
   tick();
 }).catch((e) => { err.textContent = String(e); console.error(e); });
+"#;
+
+const EMBED_MMD_PROBE_HTML: &str = r#"<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Terminal Miku 3D MMD Probe</title>
+  <style>
+    html,body{margin:0;padding:0;background:#0f172a;color:#e2e8f0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+    main{max-width:960px;margin:24px auto;padding:0 16px}
+    pre{background:#111827;padding:12px;border-radius:8px;overflow:auto}
+    a{color:#93c5fd}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>MMD Bridge Probe</h1>
+    <p>GLTF 경로와 PMX/VMD 브릿지 점검 정보를 보여줍니다. 런타임 직접 파싱이 아니라 웹 브릿지 검증용입니다.</p>
+    <pre id="probe">loading...</pre>
+    <p><a href="/">Back to preview</a></p>
+  </main>
+  <script type="module" src="/mmd_probe.js"></script>
+</body>
+</html>
+"#;
+
+const EMBED_MMD_PROBE_JS: &str = r#"const out = document.getElementById('probe');
+
+async function run() {
+  const stateRes = await fetch('/state');
+  if (!stateRes.ok) throw new Error('failed to fetch /state');
+  const state = await stateRes.json();
+
+  const lines = [
+    `glb: ${state.glb_name}`,
+    `camera_vmd: ${state.camera_vmd_name || 'none'}`,
+    `sync_offset_ms: ${state.sync_offset_ms ?? 0}`,
+    `sync_profile_key: ${state.sync_profile_key || 'none'}`,
+    `sync_profile_hit: ${state.sync_profile_hit === true}`,
+    '',
+    'Web import paths:',
+    '- GLTFLoader: native GLB path',
+    '- MMDLoader: PMX + VMD staging path (for conversion parity checks)',
+    '- Runtime policy: PMX/VMD direct runtime parsing is out-of-scope in this probe',
+  ];
+  out.textContent = lines.join('\n');
+}
+
+run().catch((err) => {
+  out.textContent = String(err);
+  console.error(err);
+});
 "#;
 
 #[derive(Debug)]
@@ -171,6 +228,8 @@ struct PreviewState {
     camera_mode: String,
     speed_factor: f32,
     sync_offset_ms: i32,
+    sync_profile_key: Option<String>,
+    sync_profile_hit: bool,
 }
 
 #[derive(Debug)]
@@ -191,7 +250,13 @@ impl PreviewRuntime {
     }
 }
 
-pub fn run_preview_server(args: &PreviewArgs, camera_vmd_path: Option<PathBuf>) -> Result<()> {
+pub fn run_preview_server(
+    args: &PreviewArgs,
+    camera_vmd_path: Option<PathBuf>,
+    sync_offset_ms: i32,
+    sync_profile_key: Option<String>,
+    sync_profile_hit: bool,
+) -> Result<()> {
     if !args.glb.exists() {
         bail!("preview GLB not found: {}", args.glb.display());
     }
@@ -204,7 +269,9 @@ pub fn run_preview_server(args: &PreviewArgs, camera_vmd_path: Option<PathBuf>) 
             anim_selector: args.anim.clone(),
             camera_mode: format!("{:?}", args.camera_mode).to_lowercase(),
             speed_factor: 1.0,
-            sync_offset_ms: 0,
+            sync_offset_ms,
+            sync_profile_key,
+            sync_profile_hit,
         },
         started: Instant::now(),
         seq: AtomicU64::new(0),
@@ -250,6 +317,24 @@ fn handle_connection(mut stream: TcpStream, runtime: Arc<PreviewRuntime>) -> Res
                 &body,
             )?;
         }
+        "/mmd_probe.js" => {
+            let body =
+                load_preview_file("mmd_probe.js").unwrap_or_else(|| EMBED_MMD_PROBE_JS.to_owned());
+            write_http_text(
+                &mut stream,
+                200,
+                "application/javascript; charset=utf-8",
+                &body,
+            )?;
+        }
+        "/mmd-probe" | "/mmd-probe.html" => {
+            write_http_text(
+                &mut stream,
+                200,
+                "text/html; charset=utf-8",
+                EMBED_MMD_PROBE_HTML,
+            )?;
+        }
         "/state" => {
             let glb_name = runtime
                 .state
@@ -265,12 +350,16 @@ fn handle_connection(mut stream: TcpStream, runtime: Arc<PreviewRuntime>) -> Res
                 .and_then(|v| v.to_str())
                 .unwrap_or("");
             let anim_selector = runtime.state.anim_selector.clone().unwrap_or_default();
+            let sync_profile_key = runtime.state.sync_profile_key.clone().unwrap_or_default();
             let body = format!(
-                "{{\"glb_url\":\"/asset/glb\",\"glb_name\":\"{}\",\"camera_vmd_url\":\"/asset/camera\",\"camera_vmd_name\":\"{}\",\"anim_selector\":\"{}\",\"camera_mode\":\"{}\"}}",
+                "{{\"glb_url\":\"/asset/glb\",\"glb_name\":\"{}\",\"camera_vmd_url\":\"/asset/camera\",\"camera_vmd_name\":\"{}\",\"anim_selector\":\"{}\",\"camera_mode\":\"{}\",\"sync_offset_ms\":{},\"sync_profile_key\":\"{}\",\"sync_profile_hit\":{},\"sync_drift_ema\":0.0,\"sync_hard_snap_count\":0}}",
                 json_escape(glb_name),
                 json_escape(camera_name),
                 json_escape(&anim_selector),
                 json_escape(&runtime.state.camera_mode),
+                runtime.state.sync_offset_ms,
+                json_escape(&sync_profile_key),
+                runtime.state.sync_profile_hit,
             );
             write_http_text(&mut stream, 200, "application/json", &body)?;
         }

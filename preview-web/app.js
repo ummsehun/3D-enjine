@@ -65,7 +65,7 @@ async function init() {
     actions = gltf.animations.map((clip) => mixer.clipAction(clip));
     playAnimation(state.anim_selector);
   }
-  hud.textContent = `preview | mode=${state.camera_mode} | glb=${state.glb_name}`;
+  hud.textContent = `preview | mode=${state.camera_mode} | glb=${state.glb_name} | profile=${state.sync_profile_hit ? "hit" : "miss"} | offset=${state.sync_offset_ms ?? 0}ms`;
 }
 
 function applySync(data) {
@@ -119,7 +119,11 @@ function tick() {
     mixer.update(dt * speed);
   }
   const staleMs = performance.now() - lastSyncAt;
-  hud.textContent = `preview | mode=${state?.camera_mode ?? "n/a"} | t=${localClockSec.toFixed(3)} | sync_seq=${sync.seq} | stale=${staleMs.toFixed(0)}ms`;
+  const profile = state?.sync_profile_hit ? "hit" : "miss";
+  const profileKey = state?.sync_profile_key || "none";
+  const drift = Number.isFinite(state?.sync_drift_ema) ? state.sync_drift_ema.toFixed(4) : "0.0000";
+  const snaps = Number.isFinite(state?.sync_hard_snap_count) ? state.sync_hard_snap_count : 0;
+  hud.textContent = `preview | mode=${state?.camera_mode ?? "n/a"} | t=${localClockSec.toFixed(3)} | sync_seq=${sync.seq} | stale=${staleMs.toFixed(0)}ms | profile=${profile} | drift=${drift} | snaps=${snaps} | key=${profileKey}`;
   renderer.render(scene, camera);
 }
 

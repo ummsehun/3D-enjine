@@ -18,6 +18,12 @@ enum ImageColorSpace {
     Linear,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SharpenPolicy {
+    All,
+    SrgbOnly,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct UsageCounter {
     srgb_hits: usize,
@@ -40,6 +46,11 @@ pub fn run_preprocess(args: &PreprocessArgs) -> Result<()> {
         ),
     };
     let mut sharpen = args.upscale_sharpen.clamp(0.0, 2.0);
+    let sharpen_policy = if matches!(args.preset, PreprocessPresetArg::FacePriority) {
+        SharpenPolicy::SrgbOnly
+    } else {
+        SharpenPolicy::All
+    };
     if matches!(args.preset, PreprocessPresetArg::WebParity) && factor == 2 {
         // Keep authored texture intent by default in web-parity mode.
         factor = 1;
@@ -94,7 +105,7 @@ pub fn run_preprocess(args: &PreprocessArgs) -> Result<()> {
                 .get(index)
                 .copied()
                 .unwrap_or(ImageColorSpace::Srgb);
-            match upscale_image_bytes(&source_bytes, factor, sharpen, color_space) {
+            match upscale_image_bytes(&source_bytes, factor, sharpen, color_space, sharpen_policy) {
                 Ok(png_bytes) => {
                     set_image_as_data_uri_png(image, &png_bytes);
                     report.images_upscaled = report.images_upscaled.saturating_add(1);
@@ -294,6 +305,7 @@ fn upscale_image_bytes(
     factor: u32,
     sharpen: f32,
     color_space: ImageColorSpace,
+    sharpen_policy: SharpenPolicy,
 ) -> Result<Vec<u8>> {
     let decoded = image::load_from_memory(image_bytes).context("failed to decode image bytes")?;
     let (src_w, src_h) = decoded.dimensions();
@@ -311,7 +323,10 @@ fn upscale_image_bytes(
         )
     };
 
-    if sharpen > f32::EPSILON {
+    let should_sharpen = sharpen > f32::EPSILON
+        && (matches!(sharpen_policy, SharpenPolicy::All)
+            || matches!(color_space, ImageColorSpace::Srgb));
+    if should_sharpen {
         let sigma = (sharpen * 2.0).clamp(0.1, 6.0);
         let dyn_image = DynamicImage::ImageRgba8(upscaled);
         upscaled = dyn_image.unsharpen(sigma, 1).to_rgba8();
@@ -388,5 +403,44 @@ mod tests {
     fn decode_base64_data_uri_payload() {
         let data = decode_data_uri("image/png;base64,aGVsbG8=").expect("decode");
         assert_eq!(data, b"hello");
+    }
+
+    #[test]
+    fn face_priority_skips_sharpen_for_linear_textures() {
+        let mut image = RgbaImage::new(2, 2);
+        image.put_pixel(0, 0, Rgba([30, 80, 160, 255]));
+        image.put_pixel(1, 0, Rgba([220, 30, 80, 255]));
+        image.put_pixel(0, 1, Rgba([50, 200, 70, 255]));
+        image.put_pixel(1, 1, Rgba([240, 240, 80, 255]));
+        let mut src = Vec::new();
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut Cursor::new(&mut src), ImageFormat::Png)
+            .expect("encode src");
+
+        let linear_a = upscale_image_bytes(
+            &src,
+            2,
+            0.8,
+            ImageColorSpace::Linear,
+            SharpenPolicy::SrgbOnly,
+        )
+        .expect("linear a");
+        let linear_b = upscale_image_bytes(
+            &src,
+            2,
+            0.0,
+            ImageColorSpace::Linear,
+            SharpenPolicy::SrgbOnly,
+        )
+        .expect("linear b");
+        assert_eq!(linear_a, linear_b);
+
+        let srgb_a =
+            upscale_image_bytes(&src, 2, 0.8, ImageColorSpace::Srgb, SharpenPolicy::SrgbOnly)
+                .expect("srgb a");
+        let srgb_b =
+            upscale_image_bytes(&src, 2, 0.0, ImageColorSpace::Srgb, SharpenPolicy::SrgbOnly)
+                .expect("srgb b");
+        assert_ne!(srgb_a, srgb_b);
     }
 }

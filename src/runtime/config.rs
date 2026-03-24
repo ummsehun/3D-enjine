@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::runtime::sync_profile::SyncProfileMode;
 use crate::scene::{
     AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
     CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
@@ -87,6 +88,8 @@ pub struct GasciiConfig {
     pub sync_policy: SyncPolicy,
     pub sync_hard_snap_ms: u32,
     pub sync_kp: f32,
+    pub sync_profile_dir: PathBuf,
+    pub sync_profile_mode: SyncProfileMode,
     pub upscale_factor: u32,
     pub upscale_sharpen: f32,
     pub triangle_stride: usize,
@@ -163,6 +166,8 @@ impl Default for GasciiConfig {
             sync_policy: SyncPolicy::Continuous,
             sync_hard_snap_ms: 120,
             sync_kp: 0.15,
+            sync_profile_dir: PathBuf::from("assets/sync"),
+            sync_profile_mode: SyncProfileMode::Auto,
             upscale_factor: 2,
             upscale_sharpen: 0.20,
             triangle_stride: 1,
@@ -272,6 +277,22 @@ pub fn load_gascii_config(path: &Path) -> GasciiConfig {
                 if let Ok(parsed) = value.parse::<f32>() {
                     cfg.sync_kp = parsed.clamp(0.01, 1.0);
                 }
+            }
+            "sync_profile_dir" => {
+                let raw = value.trim().trim_matches('"').trim_matches('\'');
+                if !raw.is_empty() {
+                    cfg.sync_profile_dir = PathBuf::from(raw);
+                }
+            }
+            "sync_profile_mode" => {
+                let lower = value.to_ascii_lowercase();
+                cfg.sync_profile_mode = if lower.starts_with("off") || lower == "0" {
+                    SyncProfileMode::Off
+                } else if lower.starts_with("wri") {
+                    SyncProfileMode::Write
+                } else {
+                    SyncProfileMode::Auto
+                };
             }
             "upscale_factor" => {
                 if let Ok(parsed) = value.parse::<u32>() {
@@ -778,6 +799,8 @@ mod tests {
         assert_eq!(cfg.sync_policy, SyncPolicy::Continuous);
         assert_eq!(cfg.sync_hard_snap_ms, 120);
         assert!((cfg.sync_kp - 0.15).abs() < 1e-6);
+        assert_eq!(cfg.sync_profile_dir, PathBuf::from("assets/sync"));
+        assert_eq!(cfg.sync_profile_mode, SyncProfileMode::Auto);
         assert_eq!(cfg.upscale_factor, 2);
         assert!((cfg.upscale_sharpen - 0.20).abs() < 1e-6);
         assert_eq!(cfg.triangle_stride, 1);
@@ -829,7 +852,7 @@ mod tests {
         let path = dir.path().join("Gascii.config");
         fs::write(
             &path,
-            "cell_aspect_mode = manual\ncell_aspect_trim = 1.15\ncontrast_profile = fixed\nsync_offset_ms = -120\nsync_speed_mode = realtime\nsync_policy = fixed\nsync_hard_snap_ms = 160\nsync_kp = 0.2\ncolor_mode=ansi\nascii_force_color=false\noutput_mode=kitty-hq\nkitty_transport=direct\nkitty_compression=zlib\nkitty_internal_res=1280x720\nkitty_scale=1.25\nhq_target_fps=30\nsubject_exposure_only=off\nstage_role=off\nstage_luma_cap=0.55\nrecover_color=off\ngraphics_protocol=kitty\nupscale_factor=4\nupscale_sharpen=0.6\nbraille_profile=normal\ntheme=holo\naudio_reactive=high\ncinematic_camera=aggressive\nreactive_gain=0.42\nperf_profile=smooth\ndetail_profile=ultra\nclarity_profile=extreme\nansi_quantization=off\nbackend=gpu-preview\nstage_dir=assets/stage\nstage_selection=world is mine\nexposure_bias=0.18\ncenter_lock=false\ncenter_lock_mode=mixed\nwasd_mode=orbit\nfreefly_speed=2.4\ncamera_look_speed=1.8\ncamera_dir=assets/camera\ncamera_selection=none\ncamera_mode=blend\ncamera_align_preset=alt-b\ncamera_unit_scale=0.12\ncamera_vmd_fps=60\ncamera_vmd_path=assets/camera/world_is_mine.vmd\ncamera_focus=face\nmaterial_color=off\ntexture_sampling=bilinear\ntexture_v_origin=legacy\ntexture_sampler=override\nbraille_aspect_compensation=1.12\nmodel_lift=0.2\nedge_accent_strength=0.5\nbg_suppression=0.42\nstage_level=4\nstage_reactive=off\n",
+            "cell_aspect_mode = manual\ncell_aspect_trim = 1.15\ncontrast_profile = fixed\nsync_offset_ms = -120\nsync_speed_mode = realtime\nsync_policy = fixed\nsync_hard_snap_ms = 160\nsync_kp = 0.2\nsync_profile_dir = assets/sync/custom\nsync_profile_mode = write\ncolor_mode=ansi\nascii_force_color=false\noutput_mode=kitty-hq\nkitty_transport=direct\nkitty_compression=zlib\nkitty_internal_res=1280x720\nkitty_scale=1.25\nhq_target_fps=30\nsubject_exposure_only=off\nstage_role=off\nstage_luma_cap=0.55\nrecover_color=off\ngraphics_protocol=kitty\nupscale_factor=4\nupscale_sharpen=0.6\nbraille_profile=normal\ntheme=holo\naudio_reactive=high\ncinematic_camera=aggressive\nreactive_gain=0.42\nperf_profile=smooth\ndetail_profile=ultra\nclarity_profile=extreme\nansi_quantization=off\nbackend=gpu-preview\nstage_dir=assets/stage\nstage_selection=world is mine\nexposure_bias=0.18\ncenter_lock=false\ncenter_lock_mode=mixed\nwasd_mode=orbit\nfreefly_speed=2.4\ncamera_look_speed=1.8\ncamera_dir=assets/camera\ncamera_selection=none\ncamera_mode=blend\ncamera_align_preset=alt-b\ncamera_unit_scale=0.12\ncamera_vmd_fps=60\ncamera_vmd_path=assets/camera/world_is_mine.vmd\ncamera_focus=face\nmaterial_color=off\ntexture_sampling=bilinear\ntexture_v_origin=legacy\ntexture_sampler=override\nbraille_aspect_compensation=1.12\nmodel_lift=0.2\nedge_accent_strength=0.5\nbg_suppression=0.42\nstage_level=4\nstage_reactive=off\n",
         )
         .expect("write config");
 
@@ -896,5 +919,7 @@ mod tests {
         assert_eq!(cfg.sync_policy, SyncPolicy::Fixed);
         assert_eq!(cfg.sync_hard_snap_ms, 160);
         assert!((cfg.sync_kp - 0.2).abs() < 1e-6);
+        assert_eq!(cfg.sync_profile_dir, PathBuf::from("assets/sync/custom"));
+        assert_eq!(cfg.sync_profile_mode, SyncProfileMode::Write);
     }
 }

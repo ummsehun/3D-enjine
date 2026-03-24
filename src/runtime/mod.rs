@@ -5,4 +5,5 @@ pub mod graphics_proto;
 pub mod preprocess;
 pub mod preview;
 pub mod start_ui;
+pub mod sync_profile;
 pub mod terminal;

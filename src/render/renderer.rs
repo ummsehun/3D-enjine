@@ -3,10 +3,11 @@ use std::fmt::Write as _;
 
 use crate::math::{depth_less, perspective_matrix};
 use crate::scene::{
-    AnsiQuantization, BrailleProfile, ClarityProfile, ColorMode, ContrastProfile, DEFAULT_CHARSET,
+    AnsiQuantization, BrailleProfile, CameraFocusMode, ClarityProfile, ColorMode, ContrastProfile,
     DetailProfile, KittyPipelineMode, MaterialAlphaMode, MeshCpu, MeshLayer, RenderConfig,
     RenderMode, SceneCpu, StageRole, TextureColorSpace, TextureFilterMode, TextureSamplerMode,
     TextureSamplingMode, TextureVOrigin, TextureWrapMode, ThemeStyle, UvTransform2D,
+    DEFAULT_CHARSET,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -694,7 +695,9 @@ fn sample_material(
                         }
                     }
                 };
-                let mip_level = select_mip_level(texture, depth, config.texture_mip_bias);
+                let sampling_mode = prefer_sampling_for_focus(sampling_mode, config.camera_focus);
+                let mip_level =
+                    select_mip_level(texture, depth, config.texture_mip_bias, config.camera_focus);
                 let sampled = sample_texture_rgba(
                     texture,
                     selected_uv,
@@ -767,13 +770,7 @@ fn sample_texture_rgba(
     }
 }
 
-fn sample_texture_nearest(
-    width: u32,
-    height: u32,
-    rgba8: &[u8],
-    u: f32,
-    v: f32,
-) -> [f32; 4] {
+fn sample_texture_nearest(width: u32, height: u32, rgba8: &[u8], u: f32, v: f32) -> [f32; 4] {
     if width == 0 || height == 0 {
         return [1.0, 1.0, 1.0, 1.0];
     }
@@ -782,13 +779,7 @@ fn sample_texture_nearest(
     sample_texture_texel(width, height, rgba8, x, y)
 }
 
-fn sample_texture_bilinear(
-    width: u32,
-    height: u32,
-    rgba8: &[u8],
-    u: f32,
-    v: f32,
-) -> [f32; 4] {
+fn sample_texture_bilinear(width: u32, height: u32, rgba8: &[u8], u: f32, v: f32) -> [f32; 4] {
     if width == 0 || height == 0 {
         return [1.0, 1.0, 1.0, 1.0];
     }
@@ -865,13 +856,36 @@ fn texture_level(texture: &crate::scene::TextureCpu, mip_level: usize) -> (u32, 
     (texture.width, texture.height, texture.rgba8.as_slice())
 }
 
-fn select_mip_level(texture: &crate::scene::TextureCpu, depth: f32, mip_bias: f32) -> usize {
+fn prefer_sampling_for_focus(
+    mode: TextureSamplingMode,
+    focus: CameraFocusMode,
+) -> TextureSamplingMode {
+    if matches!(focus, CameraFocusMode::Face | CameraFocusMode::Upper)
+        && matches!(mode, TextureSamplingMode::Nearest)
+    {
+        TextureSamplingMode::Bilinear
+    } else {
+        mode
+    }
+}
+
+fn select_mip_level(
+    texture: &crate::scene::TextureCpu,
+    depth: f32,
+    mip_bias: f32,
+    focus: CameraFocusMode,
+) -> usize {
     let max_level = texture.mip_levels.len();
     if max_level == 0 {
         return 0;
     }
+    let focus_bias = match focus {
+        CameraFocusMode::Face => -1.25,
+        CameraFocusMode::Upper => -0.65,
+        _ => 0.0,
+    };
     let depth_term = depth.clamp(0.0, 1.0) * 6.0;
-    let lod = (depth_term + mip_bias).clamp(0.0, max_level as f32);
+    let lod = (depth_term + mip_bias + focus_bias).clamp(0.0, max_level as f32);
     lod.floor() as usize
 }
 
@@ -881,7 +895,11 @@ fn wrap_uv(value: f32, mode: TextureWrapMode) -> f32 {
         TextureWrapMode::MirroredRepeat => {
             let whole = value.floor() as i32;
             let frac = value - value.floor();
-            if whole & 1 == 0 { frac } else { 1.0 - frac }
+            if whole & 1 == 0 {
+                frac
+            } else {
+                1.0 - frac
+            }
         }
         TextureWrapMode::ClampToEdge => value.clamp(0.0, 1.0 - 1.0e-6),
     }
@@ -2409,7 +2427,11 @@ fn glyph_intensity(glyph: char, charset: &[char]) -> f32 {
         let denom = charset.len().saturating_sub(1).max(1) as f32;
         return (index as f32 / denom).clamp(0.0, 1.0);
     }
-    if glyph == ' ' { 0.0 } else { 1.0 }
+    if glyph == ' ' {
+        0.0
+    } else {
+        1.0
+    }
 }
 
 fn visible_cell_ratio(frame: &FrameBuffers) -> f32 {
@@ -2623,7 +2645,9 @@ fn select_charset<'a>(config: &RenderConfig, fallback: &'a [char], cells: usize)
 mod tests {
     use super::*;
     use crate::scene::{
-        AnsiQuantization, BrailleProfile, CellAspectMode, ColorMode, RenderConfig, ThemeStyle,
+        AnsiQuantization, BrailleProfile, CameraFocusMode, CellAspectMode, ColorMode,
+        MaterialAlphaMode, MaterialCpu, RenderConfig, TextureColorSpace, TextureCpu,
+        TextureFilterMode, TextureLevelCpu, TextureSamplingMode, TextureWrapMode, ThemeStyle,
     };
 
     #[test]
@@ -2720,5 +2744,125 @@ mod tests {
         frame.depth = vec![f32::INFINITY, 0.3, f32::INFINITY, 0.7];
         let ratio = visible_cell_ratio(&frame);
         assert!((ratio - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn face_focus_promotes_bilinear_sampling() {
+        assert!(matches!(
+            prefer_sampling_for_focus(TextureSamplingMode::Nearest, CameraFocusMode::Face),
+            TextureSamplingMode::Bilinear
+        ));
+        assert!(matches!(
+            prefer_sampling_for_focus(TextureSamplingMode::Nearest, CameraFocusMode::Upper),
+            TextureSamplingMode::Bilinear
+        ));
+        assert!(matches!(
+            prefer_sampling_for_focus(TextureSamplingMode::Nearest, CameraFocusMode::Auto),
+            TextureSamplingMode::Nearest
+        ));
+    }
+
+    #[test]
+    fn face_focus_prefers_sharper_mip_levels() {
+        let texture = TextureCpu {
+            width: 4,
+            height: 4,
+            rgba8: vec![255; 4 * 4 * 4],
+            source_format: "png".to_owned(),
+            color_space: TextureColorSpace::Srgb,
+            mip_levels: vec![
+                TextureLevelCpu {
+                    width: 2,
+                    height: 2,
+                    rgba8: vec![200; 2 * 2 * 4],
+                },
+                TextureLevelCpu {
+                    width: 1,
+                    height: 1,
+                    rgba8: vec![120; 4],
+                },
+            ],
+        };
+        let base = select_mip_level(&texture, 0.85, 0.0, CameraFocusMode::Auto);
+        let face = select_mip_level(&texture, 0.85, 0.0, CameraFocusMode::Face);
+        assert!(face <= base);
+    }
+
+    fn sample_scene_with_texture(texel: [u8; 4], color_space: TextureColorSpace) -> SceneCpu {
+        let material = MaterialCpu {
+            base_color_factor: [1.0, 1.0, 1.0, 1.0],
+            base_color_texture: Some(0),
+            base_color_tex_coord: 0,
+            base_color_uv_transform: None,
+            base_color_wrap_s: TextureWrapMode::Repeat,
+            base_color_wrap_t: TextureWrapMode::Repeat,
+            base_color_min_filter: TextureFilterMode::Linear,
+            base_color_mag_filter: TextureFilterMode::Linear,
+            emissive_factor: [0.0, 0.0, 0.0],
+            alpha_mode: MaterialAlphaMode::Opaque,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+        };
+        let texture = TextureCpu {
+            width: 1,
+            height: 1,
+            rgba8: texel.to_vec(),
+            source_format: "png".to_owned(),
+            color_space,
+            mip_levels: Vec::new(),
+        };
+        SceneCpu {
+            materials: vec![material],
+            textures: vec![texture],
+            ..SceneCpu::default()
+        }
+    }
+
+    #[test]
+    fn material_sampling_respects_texture_color_space() {
+        let linear_scene =
+            sample_scene_with_texture([128, 128, 128, 200], TextureColorSpace::Linear);
+        let srgb_scene = sample_scene_with_texture([128, 128, 128, 200], TextureColorSpace::Srgb);
+        let cfg = RenderConfig::default();
+
+        let sampled_linear = sample_material(
+            &linear_scene,
+            Some(0),
+            Vec2::ZERO,
+            Vec2::ZERO,
+            0.2,
+            [1.0, 1.0, 1.0, 1.0],
+            &cfg,
+        );
+        let sampled_srgb = sample_material(
+            &srgb_scene,
+            Some(0),
+            Vec2::ZERO,
+            Vec2::ZERO,
+            0.2,
+            [1.0, 1.0, 1.0, 1.0],
+            &cfg,
+        );
+
+        assert!(sampled_srgb.albedo_linear[0] < sampled_linear.albedo_linear[0]);
+        assert!((sampled_linear.alpha - sampled_srgb.alpha).abs() < 1e-6);
+    }
+
+    #[test]
+    fn material_sampling_clamps_alpha_to_unit_interval() {
+        let mut scene = sample_scene_with_texture([200, 200, 200, 255], TextureColorSpace::Linear);
+        scene.materials[0].base_color_factor[3] = 2.0;
+        let cfg = RenderConfig::default();
+        let sampled = sample_material(
+            &scene,
+            Some(0),
+            Vec2::ZERO,
+            Vec2::ZERO,
+            0.2,
+            [1.0, 1.0, 1.5, 2.0],
+            &cfg,
+        );
+        assert!((0.0..=1.0).contains(&sampled.alpha));
+        assert!((sampled.alpha - 1.0).abs() < 1e-6);
     }
 }

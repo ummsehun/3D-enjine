@@ -9,6 +9,7 @@ CPU-first terminal renderer for 3D meshes/animations (ASCII/Braille) with option
 - GLB material color pipeline (`baseColorFactor` + `COLOR_0` + `TEXCOORD_0` + texture sampling)
 - `KHR_texture_transform` 반영(`baseColorTexture` UV transform/texCoord override)
 - `preprocess` 서브커맨드(GLB 텍스처 업스케일/샤프닝, 원본 보존)
+- 곡/카메라 조합별 sync profile 자동 적용/저장(`assets/sync/profiles.json`)
 - Skeletal animation playback (glTF skin)
 - Morph target(표정) 애니메이션 재생 (`weights` 채널)
 - `cargo start` Ratatui 단계형 위저드 (Model → Music → Stage → Camera → Render → Aspect → Confirm)
@@ -28,6 +29,8 @@ CPU-first terminal renderer for 3D meshes/animations (ASCII/Braille) with option
 - `assets/stage/{dir}` 스캔 + 상태 분류(`사용 가능`/`PMX 변환 필요`/`사용 불가`)
 - `stage.meta.toml` 기반 스테이지 transform(offset/scale/rotation) 적용
 - `gpu`(macOS + feature build) 실험 경로 + 미지원 환경 CPU fallback
+- `preprocess --preset face-priority` 얼굴 디테일 우선 텍스처 처리(sRGB 샤픈, linear 샤픈 금지)
+- `preview /state` sync 메타 + `/mmd-probe` GLB vs PMX/VMD 브릿지 점검 경로
 
 ## Commands
 
@@ -39,16 +42,19 @@ cargo start --stage-dir assets/stage --stage auto
 cargo start --stage "MyStageDir" --clarity-profile sharp --ansi-quantization off --model-lift 0.14
 cargo start --mode ascii --color-mode mono --ascii-force-color on --ansi-quantization off
 cargo start --sync-offset-ms 120 --sync-speed-mode auto --cell-aspect-mode auto
+cargo start --sync-profile-dir assets/sync --sync-profile-mode auto
 cargo start --mode braille --color-mode ansi --braille-profile safe --theme theater --audio-reactive on --cinematic-camera on --reactive-gain 0.35 --perf-profile balanced --detail-profile ultra --center-lock-mode root --camera-focus auto --material-color on --texture-sampling nearest --backend cpu
 cargo start --camera-vmd assets/camera/world_is_mine.vmd --camera-mode vmd --camera-align-preset std --camera-unit-scale 0.08 --camera-vmd-fps 30
 cargo run -- run --scene cube --mode ascii --fps-cap 30
 cargo run -- run --scene glb --glb /path/to/model.glb --fps-cap 0
 cargo run -- run --scene glb --glb /path/to/model.glb --anim 0 --mode ascii --fps-cap 30 --cell-aspect 0.5 --cell-aspect-mode auto --stage-dir assets/stage --stage auto
 cargo run -- run --scene glb --glb /path/to/model.glb --output-mode hybrid --graphics-protocol auto --sync-policy continuous --sync-hard-snap-ms 120 --sync-kp 0.15
+cargo run -- run --scene glb --glb /path/to/model.glb --sync-profile-mode write --sync-profile-key world_is_mine
 cargo run -- run --scene glb --glb /path/to/model.glb --wasd-mode freefly --freefly-speed 1.2 --camera-look-speed 1.2
 cargo run --features gpu -- run --scene glb --glb /path/to/model.glb --mode braille --color-mode ansi --braille-profile normal --theme neon --perf-profile smooth --backend gpu
 cargo run -- preprocess --glb assets/glb/miku.glb --out assets/glb/miku_up2.glb --upscale-factor 2 --upscale-sharpen 0.20
 cargo run -- preprocess --preset web-parity --glb assets/glb/miku.glb --out assets/glb/miku_web.glb
+cargo run -- preprocess --preset face-priority --glb assets/glb/miku.glb --out assets/glb/miku_face.glb --upscale-factor 2 --upscale-sharpen 0.35
 cargo run -- run --scene obj --obj /path/to/model.obj --mode ascii --fps-cap 30
 cargo run -- inspect --glb /path/to/model.glb
 cargo run -- preview --glb /path/to/model.glb --anim 0 --camera-vmd assets/camera/world_is_mine.vmd --camera-mode blend --camera-align-preset alt-a --camera-unit-scale 0.08 --port 8787
@@ -139,6 +145,8 @@ cargo run -- bench --scene glb-anim --glb /path/to/model.glb --anim 0 --seconds 
 - `sync_policy = continuous|fixed|manual`
 - `sync_hard_snap_ms = 10..2000`
 - `sync_kp = 0.01..1.0`
+- `sync_profile_dir = assets/sync` (프로필 저장 디렉터리)
+- `sync_profile_mode = auto|off|write`
 - `output_mode = text|hybrid|kitty-hq` (기본 `text`)
 - `graphics_protocol = auto|kitty|iterm2|none`
 - `kitty_transport = shm|direct`
@@ -179,6 +187,8 @@ sync_speed_mode = auto
 sync_policy = continuous
 sync_hard_snap_ms = 120
 sync_kp = 0.15
+sync_profile_dir = assets/sync
+sync_profile_mode = auto
 output_mode = text
 recover_color = auto
 graphics_protocol = auto
@@ -238,6 +248,8 @@ min_triangle_area_px2 = 0.08
 
 - `start`에서 선택한 음악은 `rodio`로 루프 재생됩니다.
 - 기본 동기화는 `sync_speed_mode=auto`일 때 `clip_duration / audio_duration` 계수로 애니메이션 시간을 자동 보정합니다.
+- 적용 우선순위는 `CLI > sync profile > Gascii.config > default` 입니다.
+- `sync_profile_mode=auto|write`에서 런타임 중 `,` `.` `/`로 오프셋을 조정하면 종료 시 `assets/sync/profiles.json`에 write-back 됩니다.
 - 오디오 초기화 실패 시 렌더링은 계속 진행되며 무음으로 동작합니다.
 - 시작 위저드에서 스테이지를 선택할 수 있으며, `PMX 변환 필요` 항목은 실행 시 차단 + 변환 안내를 출력합니다.
 - PMX 스테이지는 런타임에서 직접 로드하지 않습니다. Blender + MMD Tools로 GLB로 변환한 뒤 같은 `{dir}`에 두면 `사용 가능`으로 자동 전환됩니다.
@@ -279,6 +291,8 @@ min_triangle_area_px2 = 0.08
 ## Web Preview
 
 - `preview` 명령은 로컬 Three.js 비교 경로를 띄웁니다.
+- `/state`에는 `sync_offset_ms`, `sync_profile_key`, `sync_profile_hit`, `sync_drift_ema`, `sync_hard_snap_count`가 포함됩니다.
+- `/mmd-probe`는 GLTFLoader 경로와 PMX/VMD 브릿지 점검 정보를 노출합니다.
 - `output_mode=kitty-hq|hybrid`는 지원 터미널이면 그래픽 프로토콜을 사용하고, 실패 시 즉시 텍스트 경로로 전환합니다.
 - 기본 주소: `http://127.0.0.1:8787`
 - 동기화 채널:
@@ -294,3 +308,4 @@ min_triangle_area_px2 = 0.08
 - 로컬 자산(`assets-local/`) 기준으로 실행하세요.
 - PMX/VMD는 오프라인에서 GLB로 변환 후 사용하세요.
 - 변환 가이드는 `/Users/user/miku/scripts/convert_mmd_to_glb.md` 참고.
+- 웹 브릿지/변환 기준 문서는 `/Users/user/miku/docs/web_import_bridge.md` 참고.

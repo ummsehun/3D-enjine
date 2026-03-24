@@ -11,14 +11,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::window_size;
 use glam::{Quat, Vec3};
 use rodio::{Decoder, OutputStream, Sink, Source};
 
 use crate::{
-    animation::{ChannelTarget, compute_global_matrices, default_poses},
+    animation::{compute_global_matrices, default_poses, ChannelTarget},
     assets::vmd_camera::parse_vmd_camera,
     cli::{
         BenchArgs, BenchSceneArg, Cli, Commands, InspectArgs, PreprocessArgs, PreviewArgs, RunArgs,
@@ -30,27 +30,31 @@ use crate::{
     render::backend::render_frame_with_backend,
     renderer::{Camera, FrameBuffers, GlyphRamp, RenderScratch, RenderStats},
     runtime::{
-        config::{GasciiConfig, load_gascii_config},
+        config::{load_gascii_config, GasciiConfig},
         graphics_proto::{
             cleanup_orphan_shm_files, cleanup_shm_registry, detect_supported_protocol,
         },
         preprocess::run_preprocess,
         preview::run_preview_server,
         start_ui::{
-            StageChoice, StageStatus, StageTransform, StartWizardDefaults, run_start_wizard,
+            run_start_wizard, StageChoice, StageStatus, StageTransform, StartWizardDefaults,
+        },
+        sync_profile::{
+            build_profile_key, default_profile_store_path, SyncProfileEntry, SyncProfileMode,
+            SyncProfileStore,
         },
     },
     scene::{
+        estimate_cell_aspect_from_window, kitty_internal_resolution, resolve_cell_aspect,
         AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
         CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
         ClarityProfile, ColorMode, ContrastProfile, DetailProfile, FreeFlyState, GraphicsProtocol,
         KittyCompression, KittyInternalResPreset, KittyPipelineMode, KittyTransport, MeshLayer,
         Node, PerfProfile, RecoverStrategy, RenderBackend, RenderConfig, RenderMode,
         RenderOutputMode, SceneCpu, StageRole, SyncPolicy, SyncSpeedMode, TextureSamplingMode,
-        ThemeStyle, estimate_cell_aspect_from_window, kitty_internal_resolution,
-        resolve_cell_aspect,
+        ThemeStyle,
     },
-    terminal::{PresentMode, TerminalSession, supports_truecolor},
+    terminal::{supports_truecolor, PresentMode, TerminalSession},
 };
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -135,6 +139,8 @@ struct AudioSyncRuntime {
 struct ContinuousSyncState {
     anim_time: f32,
     initialized: bool,
+    drift_ema: f32,
+    hard_snap_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -792,6 +798,7 @@ fn start(args: StartArgs) -> Result<()> {
     let runtime_cfg = load_runtime_config();
     let visual = resolve_visual_options_for_start(&args, &runtime_cfg);
     let sync_defaults = resolve_sync_options_for_start(&args, &runtime_cfg);
+    let sync_profile_defaults = resolve_sync_profile_options_for_start(&args, &runtime_cfg);
     let model_files = discover_glb_files(&args.dir)?;
     if model_files.is_empty() {
         bail!(
@@ -927,13 +934,59 @@ fn start(args: StartArgs) -> Result<()> {
         }
     }
     let animation_index = resolve_animation_index(&scene, args.anim.as_deref())?;
+    let (sync_profile_context, sync_profile_entry) = resolve_sync_profile_for_assets(
+        &sync_profile_defaults,
+        RunSceneArg::Glb,
+        Some(selection.glb_path.as_path()),
+        selection.music_path.as_deref(),
+        selection.camera_vmd_path.as_deref(),
+    );
+    let mut effective_sync = ResolvedSyncOptions {
+        sync_offset_ms: selection.sync_offset_ms,
+        sync_speed_mode: selection.sync_speed_mode,
+        sync_policy: selection.sync_policy,
+        sync_hard_snap_ms: selection.sync_hard_snap_ms,
+        sync_kp: selection.sync_kp,
+    };
+    if let Some(profile) = sync_profile_entry.as_ref() {
+        if args.sync_offset_ms.is_none() && selection.sync_offset_ms == sync_defaults.sync_offset_ms
+        {
+            effective_sync.sync_offset_ms = profile.sync_offset_ms;
+        }
+        if args.sync_speed_mode.is_none()
+            && selection.sync_speed_mode == sync_defaults.sync_speed_mode
+            && profile.sync_speed_mode.is_some()
+        {
+            effective_sync.sync_speed_mode = profile
+                .sync_speed_mode
+                .unwrap_or(sync_defaults.sync_speed_mode);
+        }
+        if args.sync_hard_snap_ms.is_none()
+            && selection.sync_hard_snap_ms == sync_defaults.sync_hard_snap_ms
+            && profile.sync_hard_snap_ms.is_some()
+        {
+            effective_sync.sync_hard_snap_ms = profile
+                .sync_hard_snap_ms
+                .unwrap_or(sync_defaults.sync_hard_snap_ms)
+                .clamp(10, 2_000);
+        }
+        if args.sync_kp.is_none()
+            && selection.sync_kp == sync_defaults.sync_kp
+            && profile.sync_kp.is_some()
+        {
+            effective_sync.sync_kp = profile
+                .sync_kp
+                .unwrap_or(sync_defaults.sync_kp)
+                .clamp(0.01, 1.0);
+        }
+    }
     let clip_duration_secs = animation_index
         .and_then(|idx| scene.animations.get(idx))
         .map(|clip| clip.duration);
     let audio_sync = prepare_audio_sync(
         selection.music_path.as_deref(),
         clip_duration_secs,
-        selection.sync_speed_mode,
+        effective_sync.sync_speed_mode,
     );
     if selection.music_path.is_some() && audio_sync.is_none() {
         eprintln!("warning: audio playback unavailable. continuing in silent mode.");
@@ -1037,9 +1090,9 @@ fn start(args: StartArgs) -> Result<()> {
     config.model_lift = selection.model_lift;
     config.edge_accent_strength = selection.edge_accent_strength;
     config.braille_aspect_compensation = selection.braille_aspect_compensation;
-    config.sync_policy = selection.sync_policy;
-    config.sync_hard_snap_ms = selection.sync_hard_snap_ms;
-    config.sync_kp = selection.sync_kp;
+    config.sync_policy = effective_sync.sync_policy;
+    config.sync_hard_snap_ms = effective_sync.sync_hard_snap_ms;
+    config.sync_kp = effective_sync.sync_kp;
     apply_runtime_render_tuning(&mut config, &runtime_cfg);
     run_scene_interactive(
         scene,
@@ -1047,7 +1100,7 @@ fn start(args: StartArgs) -> Result<()> {
         false,
         config,
         audio_sync,
-        selection.sync_offset_ms,
+        effective_sync.sync_offset_ms,
         args.orbit_speed,
         args.orbit_radius,
         args.camera_height,
@@ -1055,13 +1108,14 @@ fn start(args: StartArgs) -> Result<()> {
         wasd_mode,
         freefly_speed,
         camera_settings,
+        sync_profile_context,
     )
 }
 
 fn run_interactive(args: RunArgs) -> Result<()> {
     let runtime_cfg = load_runtime_config();
     let visual = resolve_visual_options_for_run(&args, &runtime_cfg);
-    let sync = resolve_sync_options_for_run(&args, &runtime_cfg);
+    let sync_profile_defaults = resolve_sync_profile_options_for_run(&args, &runtime_cfg);
     let camera_dir = resolved_camera_dir(&args.camera_dir, &runtime_cfg);
     let camera_files = discover_camera_vmds(&camera_dir);
     let camera_selector = args
@@ -1080,6 +1134,18 @@ fn run_interactive(args: RunArgs) -> Result<()> {
                 visual.camera_vmd_path.clone()
             }
         });
+    let (sync_profile_context, sync_profile_entry) = resolve_sync_profile_for_assets(
+        &sync_profile_defaults,
+        args.scene,
+        if matches!(args.scene, RunSceneArg::Glb) {
+            args.glb.as_deref()
+        } else {
+            None
+        },
+        None,
+        resolved_camera_vmd_path.as_deref(),
+    );
+    let sync = resolve_sync_options_for_run(&args, &runtime_cfg, sync_profile_entry.as_ref());
     let (mut scene, animation_index, rotates_without_animation) = load_scene_for_run(&args)?;
     let stage_dir = resolved_stage_dir(&args.stage_dir, &runtime_cfg);
     let stage_selector = resolved_stage_selector(args.stage.as_deref(), &runtime_cfg);
@@ -1130,7 +1196,7 @@ fn run_interactive(args: RunArgs) -> Result<()> {
         align_preset: visual.camera_align_preset,
         unit_scale: visual.camera_unit_scale,
         vmd_fps: visual.camera_vmd_fps,
-        vmd_path: resolved_camera_vmd_path,
+        vmd_path: resolved_camera_vmd_path.clone(),
         look_speed: visual.camera_look_speed,
     };
     run_scene_interactive(
@@ -1147,6 +1213,7 @@ fn run_interactive(args: RunArgs) -> Result<()> {
         visual.wasd_mode,
         visual.freefly_speed,
         camera_settings,
+        sync_profile_context,
     )
 }
 
@@ -1172,7 +1239,42 @@ fn preview(args: PreviewArgs) -> Result<()> {
                 resolve_camera_vmd_selector(&camera_files, &runtime_cfg.camera_selection)
             }
         });
-    run_preview_server(&args, camera_path)
+    let profile_key = build_profile_key(
+        "glb",
+        Some(args.glb.as_path()),
+        None,
+        camera_path.as_deref(),
+    );
+    let (profile_hit, resolved_offset) =
+        if matches!(runtime_cfg.sync_profile_mode, SyncProfileMode::Off) {
+            (false, runtime_cfg.sync_offset_ms)
+        } else {
+            let store_path = default_profile_store_path(&runtime_cfg.sync_profile_dir);
+            match SyncProfileStore::load(&store_path) {
+                Ok(store) => match store.get(&profile_key) {
+                    Some(entry) => (true, entry.sync_offset_ms),
+                    None => (false, runtime_cfg.sync_offset_ms),
+                },
+                Err(err) => {
+                    eprintln!(
+                        "warning: preview sync profile load failed {}: {err}",
+                        store_path.display()
+                    );
+                    (false, runtime_cfg.sync_offset_ms)
+                }
+            }
+        };
+    run_preview_server(
+        &args,
+        camera_path,
+        resolved_offset,
+        if matches!(runtime_cfg.sync_profile_mode, SyncProfileMode::Off) {
+            None
+        } else {
+            Some(profile_key)
+        },
+        profile_hit,
+    )
 }
 
 fn preprocess(args: PreprocessArgs) -> Result<()> {
@@ -1249,6 +1351,21 @@ struct ResolvedSyncOptions {
     sync_policy: SyncPolicy,
     sync_hard_snap_ms: u32,
     sync_kp: f32,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedSyncProfileOptions {
+    mode: SyncProfileMode,
+    profile_dir: PathBuf,
+    key_override: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeSyncProfileContext {
+    mode: SyncProfileMode,
+    store_path: PathBuf,
+    key: String,
+    hit: bool,
 }
 
 fn resolve_visual_options_for_start(
@@ -1879,15 +1996,25 @@ fn resolve_sync_options_for_start(
     }
 }
 
-fn resolve_sync_options_for_run(args: &RunArgs, runtime_cfg: &GasciiConfig) -> ResolvedSyncOptions {
+fn resolve_sync_options_for_run(
+    args: &RunArgs,
+    runtime_cfg: &GasciiConfig,
+    profile: Option<&SyncProfileEntry>,
+) -> ResolvedSyncOptions {
+    let profile_speed_mode = profile.and_then(|entry| entry.sync_speed_mode);
+    let profile_hard_snap = profile.and_then(|entry| entry.sync_hard_snap_ms);
+    let profile_kp = profile.and_then(|entry| entry.sync_kp);
+    let profile_offset = profile.map(|entry| entry.sync_offset_ms);
     ResolvedSyncOptions {
         sync_offset_ms: args
             .sync_offset_ms
+            .or(profile_offset)
             .unwrap_or(runtime_cfg.sync_offset_ms)
             .clamp(-SYNC_OFFSET_LIMIT_MS, SYNC_OFFSET_LIMIT_MS),
         sync_speed_mode: args
             .sync_speed_mode
             .map(Into::into)
+            .or(profile_speed_mode)
             .unwrap_or(runtime_cfg.sync_speed_mode),
         sync_policy: args
             .sync_policy
@@ -1895,10 +2022,96 @@ fn resolve_sync_options_for_run(args: &RunArgs, runtime_cfg: &GasciiConfig) -> R
             .unwrap_or(runtime_cfg.sync_policy),
         sync_hard_snap_ms: args
             .sync_hard_snap_ms
+            .or(profile_hard_snap)
             .unwrap_or(runtime_cfg.sync_hard_snap_ms)
             .clamp(10, 2_000),
-        sync_kp: args.sync_kp.unwrap_or(runtime_cfg.sync_kp).clamp(0.01, 1.0),
+        sync_kp: args
+            .sync_kp
+            .or(profile_kp)
+            .unwrap_or(runtime_cfg.sync_kp)
+            .clamp(0.01, 1.0),
     }
+}
+
+fn resolve_sync_profile_options_for_start(
+    args: &StartArgs,
+    runtime_cfg: &GasciiConfig,
+) -> ResolvedSyncProfileOptions {
+    ResolvedSyncProfileOptions {
+        mode: args
+            .sync_profile_mode
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.sync_profile_mode),
+        profile_dir: args
+            .sync_profile_dir
+            .clone()
+            .unwrap_or_else(|| runtime_cfg.sync_profile_dir.clone()),
+        key_override: args
+            .sync_profile_key
+            .clone()
+            .filter(|value| !value.is_empty()),
+    }
+}
+
+fn resolve_sync_profile_options_for_run(
+    args: &RunArgs,
+    runtime_cfg: &GasciiConfig,
+) -> ResolvedSyncProfileOptions {
+    ResolvedSyncProfileOptions {
+        mode: args
+            .sync_profile_mode
+            .map(Into::into)
+            .unwrap_or(runtime_cfg.sync_profile_mode),
+        profile_dir: args
+            .sync_profile_dir
+            .clone()
+            .unwrap_or_else(|| runtime_cfg.sync_profile_dir.clone()),
+        key_override: args
+            .sync_profile_key
+            .clone()
+            .filter(|value| !value.is_empty()),
+    }
+}
+
+fn resolve_sync_profile_for_assets(
+    options: &ResolvedSyncProfileOptions,
+    scene_kind: RunSceneArg,
+    glb_path: Option<&Path>,
+    music_path: Option<&Path>,
+    camera_path: Option<&Path>,
+) -> (Option<RuntimeSyncProfileContext>, Option<SyncProfileEntry>) {
+    if matches!(options.mode, SyncProfileMode::Off) {
+        return (None, None);
+    }
+    let scene_kind = match scene_kind {
+        RunSceneArg::Cube => "cube",
+        RunSceneArg::Obj => "obj",
+        RunSceneArg::Glb => "glb",
+    };
+    let key = options
+        .key_override
+        .clone()
+        .unwrap_or_else(|| build_profile_key(scene_kind, glb_path, music_path, camera_path));
+    let store_path = default_profile_store_path(&options.profile_dir);
+    let profile = match SyncProfileStore::load(&store_path) {
+        Ok(store) => store.get(&key).cloned(),
+        Err(err) => {
+            eprintln!(
+                "warning: failed to load sync profiles {}: {err}",
+                store_path.display()
+            );
+            None
+        }
+    };
+    (
+        Some(RuntimeSyncProfileContext {
+            mode: options.mode,
+            store_path,
+            key,
+            hit: profile.is_some(),
+        }),
+        profile,
+    )
 }
 
 fn default_color_mode_for_mode(mode: RenderMode) -> ColorMode {
@@ -1975,6 +2188,42 @@ fn apply_distant_subject_clarity_boost(config: &mut RenderConfig, subject_height
         config.edge_accent_strength = (config.edge_accent_strength * (1.0 - 0.4 * t)).max(0.05);
         config.bg_suppression = (config.bg_suppression + 0.10 * t).clamp(0.0, 1.0);
     }
+}
+
+fn apply_face_focus_detail_boost(config: &mut RenderConfig, subject_height_ratio: f32) {
+    if !matches!(config.camera_focus, CameraFocusMode::Face) {
+        return;
+    }
+    let ratio = subject_height_ratio.clamp(0.0, 1.0);
+    let t = if ratio < 0.28 {
+        ((0.28 - ratio) / 0.28).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    config.texture_mip_bias = (config.texture_mip_bias - 0.85 - 0.65 * t).clamp(-2.0, 4.0);
+    config.edge_accent_strength = (config.edge_accent_strength + 0.20 + 0.30 * t).clamp(0.0, 2.0);
+    config.bg_suppression = (config.bg_suppression + 0.16 + 0.22 * t).clamp(0.0, 1.0);
+    if matches!(config.texture_sampling, TextureSamplingMode::Nearest) {
+        config.texture_sampling = TextureSamplingMode::Bilinear;
+    }
+    if config.triangle_stride > 1 {
+        config.triangle_stride = config.triangle_stride.saturating_sub(1);
+    }
+}
+
+fn persist_sync_profile_offset(
+    context: &RuntimeSyncProfileContext,
+    sync_offset_ms: i32,
+) -> Result<()> {
+    let mut store = SyncProfileStore::load(&context.store_path)?;
+    let mut merged = SyncProfileEntry::with_offset(sync_offset_ms.clamp(-5_000, 5_000));
+    if let Some(existing) = store.get(&context.key) {
+        merged.sync_hard_snap_ms = existing.sync_hard_snap_ms;
+        merged.sync_kp = existing.sync_kp;
+        merged.sync_speed_mode = existing.sync_speed_mode;
+    }
+    store.upsert(context.key.clone(), merged);
+    store.save_atomic(&context.store_path)
 }
 
 fn target_frame_ms(profile: PerfProfile) -> f32 {
@@ -2217,6 +2466,7 @@ fn run_scene_interactive(
     wasd_mode: CameraControlMode,
     freefly_speed: f32,
     camera_settings: RuntimeCameraSettings,
+    sync_profile: Option<RuntimeSyncProfileContext>,
 ) -> Result<()> {
     config.backend = resolve_runtime_backend(config.backend);
     let startup_graphics_notice = normalize_graphics_settings(&mut config);
@@ -2277,6 +2527,7 @@ fn run_scene_interactive(
     let mut exposure_bias = config.exposure_bias.clamp(-0.5, 0.8);
     let mut sync_offset_ms =
         initial_sync_offset_ms.clamp(-SYNC_OFFSET_LIMIT_MS, SYNC_OFFSET_LIMIT_MS);
+    let mut sync_profile_dirty = false;
     let mut contrast_preset = RuntimeContrastPreset::from_profile(config.contrast_profile);
     let mut reactive_state = ReactiveState::default();
     let mut camera_director = CameraDirectorState::default();
@@ -2292,7 +2543,17 @@ fn run_scene_interactive(
     let mut resize_recovery_pending = false;
     let mut center_lock_restore_after_freefly = center_lock_enabled;
     let mut io_failure_count: u8 = 0;
+    let profile_state_hint = sync_profile.as_ref().map(|profile| {
+        if profile.hit {
+            "profile=hit"
+        } else {
+            "profile=miss"
+        }
+    });
     let mut last_osd_notice: Option<String> = startup_graphics_notice;
+    if last_osd_notice.is_none() {
+        last_osd_notice = profile_state_hint.map(str::to_owned);
+    }
     let mut osd_until: Option<Instant> = Some(Instant::now() + Duration::from_secs(2));
     let mut last_render_stats = RenderStats::default();
     let mut effective_aspect_state = resolve_cell_aspect(&config, detect_terminal_cell_aspect());
@@ -2411,6 +2672,7 @@ fn run_scene_interactive(
 
     loop {
         let frame_start = Instant::now();
+        let sync_offset_before_input = sync_offset_ms;
         let input = process_runtime_input(
             &mut orbit_state.enabled,
             &mut orbit_state.speed,
@@ -2433,6 +2695,13 @@ fn run_scene_interactive(
         )?;
         if input.quit {
             break;
+        }
+        if sync_offset_ms != sync_offset_before_input {
+            sync_profile_dirty = true;
+            if sync_profile.is_some() {
+                last_osd_notice = Some(format!("sync profile dirty: offset={}ms", sync_offset_ms));
+                osd_until = Some(Instant::now() + Duration::from_secs(2));
+            }
         }
         if input.resized {
             terminal.force_full_repaint();
@@ -2721,6 +2990,7 @@ fn run_scene_interactive(
             last_render_stats.visible_height_ratio
         };
         apply_distant_subject_clarity_boost(&mut frame_config, prev_subject_height_ratio);
+        apply_face_focus_detail_boost(&mut frame_config, prev_subject_height_ratio);
 
         let jitter_scale = jitter_scale_for_lod(adaptive_quality.lod_level);
         let (radius_mul, height_off, focus_y_off, angle_jitter) = update_camera_director(
@@ -2946,6 +3216,10 @@ fn run_scene_interactive(
                 adaptive_quality.lod_level,
                 adaptive_quality.target_frame_ms,
                 adaptive_quality.ema_frame_ms,
+                sync_profile.as_ref().map(|profile| profile.hit),
+                sync_profile_dirty,
+                continuous_sync_state.drift_ema,
+                continuous_sync_state.hard_snap_count,
                 last_osd_notice.as_deref(),
             );
             overlay_osd(&mut frame, &status);
@@ -3092,6 +3366,18 @@ fn run_scene_interactive(
         if let Some(frame_budget) = frame_budget {
             if elapsed_frame < frame_budget {
                 thread::sleep(frame_budget - elapsed_frame);
+            }
+        }
+    }
+    if let Some(profile) = sync_profile.as_ref() {
+        if sync_profile_dirty
+            && matches!(profile.mode, SyncProfileMode::Auto | SyncProfileMode::Write)
+        {
+            if let Err(err) = persist_sync_profile_offset(profile, sync_offset_ms) {
+                eprintln!(
+                    "warning: failed to save sync profile {}: {err}",
+                    profile.store_path.display()
+                );
             }
         }
     }
@@ -4140,28 +4426,36 @@ fn compute_animation_time(
             } else {
                 state.anim_time += dt;
             }
+            state.drift_ema *= 0.92;
         }
         SyncPolicy::Fixed => {
             state.anim_time = target_audio.unwrap_or(elapsed_wall + offset);
             state.initialized = true;
+            state.drift_ema *= 0.92;
         }
         SyncPolicy::Continuous => {
             if let Some(target) = target_audio {
                 if !state.initialized {
                     state.anim_time = target;
                     state.initialized = true;
+                    state.drift_ema = 0.0;
                 } else {
                     let err = target - state.anim_time;
+                    state.drift_ema += (err.abs() - state.drift_ema) * 0.08;
                     if err.abs() > hard_snap_sec {
                         state.anim_time = target;
+                        state.hard_snap_count = state.hard_snap_count.saturating_add(1);
                     } else {
-                        let rate = (speed_factor + kp * err).clamp(0.25, 4.0);
+                        let drift_gain = (state.drift_ema / hard_snap_sec).clamp(0.0, 1.0);
+                        let long_drift_term = (err * 0.18 * drift_gain).clamp(-0.16, 0.16);
+                        let rate = (speed_factor + kp * err + long_drift_term).clamp(0.25, 4.0);
                         state.anim_time += dt * rate;
                     }
                 }
             } else {
                 state.anim_time = elapsed_wall + offset;
                 state.initialized = true;
+                state.drift_ema *= 0.92;
             }
         }
     }
@@ -4227,17 +4521,28 @@ fn format_runtime_status(
     lod_level: usize,
     target_ms: f32,
     frame_ema_ms: f32,
+    sync_profile_hit: Option<bool>,
+    sync_profile_dirty: bool,
+    drift_ema: f32,
+    hard_snap_count: u32,
     notice: Option<&str>,
 ) -> String {
+    let profile_label = match sync_profile_hit {
+        Some(true) => "hit",
+        Some(false) => "miss",
+        None => "off",
+    };
     let core = format!(
-        "offset={sync_offset_ms}ms  speed={sync_speed:.4}x  aspect={effective_aspect:.3}  contrast={}  braille={:?}  color={:?}  camera={:?}  gain={reactive_gain:.2}  exp={exposure_bias:+.2}  stage={}  center={}  lod={}  target={target_ms:.1}ms  ema={frame_ema_ms:.1}ms",
+        "offset={sync_offset_ms}ms  speed={sync_speed:.4}x  aspect={effective_aspect:.3}  contrast={}  braille={:?}  color={:?}  camera={:?}  gain={reactive_gain:.2}  exp={exposure_bias:+.2}  stage={}  center={}  lod={}  target={target_ms:.1}ms  ema={frame_ema_ms:.1}ms  profile={}{}  drift={drift_ema:.4}  snaps={hard_snap_count}",
         contrast.label(),
         braille_profile,
         color_mode,
         cinematic_mode,
         stage_level,
         if center_lock { "on" } else { "off" },
-        lod_level
+        lod_level,
+        profile_label,
+        if sync_profile_dirty { "*" } else { "" },
     );
     if let Some(extra) = notice {
         format!("{core}  note={extra}")
@@ -4760,6 +5065,8 @@ fn bench(args: BenchArgs) -> Result<()> {
 fn inspect(args: InspectArgs) -> Result<()> {
     let raw = gltf::Gltf::open(&args.glb)
         .with_context(|| format!("failed to parse glTF metadata: {}", args.glb.display()))?;
+    let unsupported_required_extensions = loader::unsupported_required_extensions(&raw);
+    let unsupported_used_extensions = loader::unsupported_used_extensions(&raw);
     let scene = loader::load_gltf(&args.glb)?;
     let extensions_required = raw
         .extensions_required()
@@ -4772,8 +5079,17 @@ fn inspect(args: InspectArgs) -> Result<()> {
     let mut khr_texture_transform_primitives = 0usize;
     let mut texcoord_override_counts: BTreeMap<u32, usize> = BTreeMap::new();
     let mut texcoord_base_counts: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut non_triangle_primitives = 0usize;
+    let mut normal_texture_primitives = 0usize;
+    let mut emissive_texture_primitives = 0usize;
+    let mut occlusion_texture_primitives = 0usize;
+    let mut metallic_roughness_texture_primitives = 0usize;
+    let mut double_sided_materials = 0usize;
     for mesh in raw.meshes() {
         for primitive in mesh.primitives() {
+            if primitive.mode() != gltf::mesh::Mode::Triangles {
+                non_triangle_primitives = non_triangle_primitives.saturating_add(1);
+            }
             let material = primitive.material();
             let pbr = material.pbr_metallic_roughness();
             if let Some(base_color_info) = pbr.base_color_texture() {
@@ -4785,6 +5101,22 @@ fn inspect(args: InspectArgs) -> Result<()> {
                         *texcoord_override_counts.entry(override_coord).or_insert(0) += 1;
                     }
                 }
+            }
+            if material.normal_texture().is_some() {
+                normal_texture_primitives = normal_texture_primitives.saturating_add(1);
+            }
+            if material.emissive_texture().is_some() {
+                emissive_texture_primitives = emissive_texture_primitives.saturating_add(1);
+            }
+            if material.occlusion_texture().is_some() {
+                occlusion_texture_primitives = occlusion_texture_primitives.saturating_add(1);
+            }
+            if pbr.metallic_roughness_texture().is_some() {
+                metallic_roughness_texture_primitives =
+                    metallic_roughness_texture_primitives.saturating_add(1);
+            }
+            if material.double_sided() {
+                double_sided_materials = double_sided_materials.saturating_add(1);
             }
         }
     }
@@ -4807,6 +5139,22 @@ fn inspect(args: InspectArgs) -> Result<()> {
         }
     );
     println!(
+        "unsupported_required_extensions: {}",
+        if unsupported_required_extensions.is_empty() {
+            "[]".to_owned()
+        } else {
+            format!("{unsupported_required_extensions:?}")
+        }
+    );
+    println!(
+        "unsupported_used_extensions: {}",
+        if unsupported_used_extensions.is_empty() {
+            "[]".to_owned()
+        } else {
+            format!("{unsupported_used_extensions:?}")
+        }
+    );
+    println!(
         "khr_texture_transform_primitives: {}",
         khr_texture_transform_primitives
     );
@@ -4826,6 +5174,21 @@ fn inspect(args: InspectArgs) -> Result<()> {
             format!("{texcoord_override_counts:?}")
         }
     );
+    println!("non_triangle_primitives: {}", non_triangle_primitives);
+    println!("normal_texture_primitives: {}", normal_texture_primitives);
+    println!(
+        "emissive_texture_primitives: {}",
+        emissive_texture_primitives
+    );
+    println!(
+        "occlusion_texture_primitives: {}",
+        occlusion_texture_primitives
+    );
+    println!(
+        "metallic_roughness_texture_primitives: {}",
+        metallic_roughness_texture_primitives
+    );
+    println!("double_sided_materials: {}", double_sided_materials);
     println!("meshes: {}", scene.meshes.len());
     println!("mesh_instances: {}", scene.mesh_instances.len());
     println!("nodes: {}", scene.nodes.len());
@@ -4842,6 +5205,15 @@ fn inspect(args: InspectArgs) -> Result<()> {
     println!("skins: {}", scene.skins.len());
     println!("materials: {}", scene.materials.len());
     println!("textures: {}", scene.textures.len());
+    let fallback_white_textures = scene
+        .textures
+        .iter()
+        .filter(|texture| texture.source_format == "FallbackWhite")
+        .count();
+    println!("fallback_white_textures: {}", fallback_white_textures);
+    println!(
+        "renderer_material_coverage: baseColor/alpha/vertexColor/textureTransform only; normal/emissive/occlusion/PBR lighting are ignored by the terminal renderer"
+    );
     println!("animations: {}", scene.animations.len());
     let mut texture_format_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut texture_color_space_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
@@ -5296,6 +5668,97 @@ mod tests {
     }
 
     #[test]
+    fn continuous_sync_tracks_drift_ema_and_hard_snaps() {
+        let mut state = ContinuousSyncState::default();
+        // First sample initializes near target.
+        let _ = compute_animation_time(
+            &mut state,
+            SyncPolicy::Continuous,
+            0.016,
+            0.016,
+            Some(0.0),
+            1.0,
+            0,
+            120,
+            0.15,
+            None,
+        );
+        // Large target jump should trigger a hard snap and non-zero drift metric.
+        let _ = compute_animation_time(
+            &mut state,
+            SyncPolicy::Continuous,
+            0.016,
+            0.032,
+            Some(2.0),
+            1.0,
+            0,
+            120,
+            0.15,
+            None,
+        );
+        assert!(state.drift_ema > 0.0);
+        assert!(state.hard_snap_count >= 1);
+    }
+
+    fn simulate_continuous_sync(
+        clip_duration: f32,
+        audio_duration: f32,
+        total_seconds: f32,
+    ) -> (f32, u32, f32) {
+        let dt = 1.0 / 60.0;
+        let warmup = 10.0;
+        let mut elapsed_wall = 0.0_f32;
+        let mut max_err_after_warmup = 0.0_f32;
+        let mut state = ContinuousSyncState::default();
+        let speed_factor = compute_animation_speed_factor(
+            Some(clip_duration),
+            Some(audio_duration),
+            SyncSpeedMode::AutoDurationFit,
+        );
+
+        while elapsed_wall < total_seconds {
+            elapsed_wall += dt;
+            let elapsed_audio = elapsed_wall.rem_euclid(audio_duration);
+            let anim_time = compute_animation_time(
+                &mut state,
+                SyncPolicy::Continuous,
+                dt,
+                elapsed_wall,
+                Some(elapsed_audio),
+                speed_factor,
+                0,
+                120,
+                0.15,
+                Some(clip_duration),
+            );
+            let target = elapsed_audio * speed_factor;
+            let raw = (target - anim_time).abs();
+            let err = raw.min((clip_duration - raw).abs());
+            if elapsed_wall >= warmup {
+                max_err_after_warmup = max_err_after_warmup.max(err);
+            }
+        }
+
+        (max_err_after_warmup, state.hard_snap_count, state.drift_ema)
+    }
+
+    #[test]
+    fn continuous_sync_converges_when_clip_longer_than_audio() {
+        let (max_err, hard_snaps, drift_ema) = simulate_continuous_sync(120.0, 117.0, 180.0);
+        assert!(max_err <= 0.120);
+        assert!(hard_snaps <= 9);
+        assert!(drift_ema.is_finite());
+    }
+
+    #[test]
+    fn continuous_sync_converges_when_audio_longer_than_clip() {
+        let (max_err, hard_snaps, drift_ema) = simulate_continuous_sync(117.0, 120.0, 180.0);
+        assert!(max_err <= 0.120);
+        assert!(hard_snaps <= 9);
+        assert!(drift_ema.is_finite());
+    }
+
+    #[test]
     fn auto_framing_focus_y_uses_center() {
         let scene = crate::scene::cube_scene();
         let framing = compute_scene_framing(&scene, &RenderConfig::default(), 0.0, 0.0, 0.0);
@@ -5497,11 +5960,9 @@ mod tests {
                 && matches!(s.status, StageStatus::NeedsConvert)
                 && s.pmx_path.is_some()
         }));
-        assert!(
-            stages
-                .iter()
-                .any(|s| s.name == "empty_stage" && matches!(s.status, StageStatus::Invalid))
-        );
+        assert!(stages
+            .iter()
+            .any(|s| s.name == "empty_stage" && matches!(s.status, StageStatus::Invalid)));
     }
 
     #[test]

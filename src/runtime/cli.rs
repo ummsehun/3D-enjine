@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use crate::runtime::sync_profile::SyncProfileMode;
 use crate::scene::{
     AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
     CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
@@ -178,6 +179,15 @@ pub struct StartArgs {
     pub sync_speed_mode: Option<SyncSpeedModeArg>,
     #[arg(long, value_enum)]
     pub sync_policy: Option<SyncPolicyArg>,
+    /// Directory for sync profile storage (`profiles.json` inside this dir).
+    #[arg(long)]
+    pub sync_profile_dir: Option<PathBuf>,
+    /// Sync profile mode.
+    #[arg(long, value_enum)]
+    pub sync_profile_mode: Option<SyncProfileModeArg>,
+    /// Optional override key for sync profile lookup.
+    #[arg(long)]
+    pub sync_profile_key: Option<String>,
     #[arg(long)]
     pub sync_hard_snap_ms: Option<u32>,
     #[arg(long)]
@@ -356,6 +366,15 @@ pub struct RunArgs {
     pub sync_speed_mode: Option<SyncSpeedModeArg>,
     #[arg(long, value_enum)]
     pub sync_policy: Option<SyncPolicyArg>,
+    /// Directory for sync profile storage (`profiles.json` inside this dir).
+    #[arg(long)]
+    pub sync_profile_dir: Option<PathBuf>,
+    /// Sync profile mode.
+    #[arg(long, value_enum)]
+    pub sync_profile_mode: Option<SyncProfileModeArg>,
+    /// Optional override key for sync profile lookup.
+    #[arg(long)]
+    pub sync_profile_key: Option<String>,
     #[arg(long)]
     pub sync_hard_snap_ms: Option<u32>,
     #[arg(long)]
@@ -577,6 +596,8 @@ pub enum PreprocessPresetArg {
     Default,
     #[value(name = "web-parity")]
     WebParity,
+    #[value(name = "face-priority")]
+    FacePriority,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -623,6 +644,13 @@ pub enum SyncPolicyArg {
     Continuous,
     Fixed,
     Manual,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SyncProfileModeArg {
+    Auto,
+    Off,
+    Write,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -862,6 +890,16 @@ impl From<SyncPolicyArg> for SyncPolicy {
             SyncPolicyArg::Continuous => SyncPolicy::Continuous,
             SyncPolicyArg::Fixed => SyncPolicy::Fixed,
             SyncPolicyArg::Manual => SyncPolicy::Manual,
+        }
+    }
+}
+
+impl From<SyncProfileModeArg> for SyncProfileMode {
+    fn from(value: SyncProfileModeArg) -> Self {
+        match value {
+            SyncProfileModeArg::Auto => SyncProfileMode::Auto,
+            SyncProfileModeArg::Off => SyncProfileMode::Off,
+            SyncProfileModeArg::Write => SyncProfileMode::Write,
         }
     }
 }

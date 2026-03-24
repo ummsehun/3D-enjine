@@ -25,11 +25,11 @@ use crate::{
     loader,
     runtime::{config::UiLanguage, terminal::RatatuiSession},
     scene::{
-        AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
-        CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
-        ClarityProfile, ColorMode, ContrastProfile, DetailProfile, GraphicsProtocol, PerfProfile,
-        RenderBackend, RenderConfig, RenderMode, RenderOutputMode, SyncPolicy, SyncSpeedMode,
-        TextureSamplingMode, ThemeStyle, estimate_cell_aspect_from_window, resolve_cell_aspect,
+        estimate_cell_aspect_from_window, resolve_cell_aspect, AnsiQuantization, AudioReactiveMode,
+        BrailleProfile, CameraAlignPreset, CameraControlMode, CameraFocusMode, CameraMode,
+        CellAspectMode, CenterLockMode, CinematicCameraMode, ClarityProfile, ColorMode,
+        ContrastProfile, DetailProfile, GraphicsProtocol, PerfProfile, RenderBackend, RenderConfig,
+        RenderMode, RenderOutputMode, SyncPolicy, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
     },
 };
 
@@ -1521,7 +1521,7 @@ fn draw_render_options(
     };
     let backend = match state.backend {
         RenderBackend::Cpu => "CPU",
-        RenderBackend::Gpu => "GPU",
+        RenderBackend::Gpu => "CPU fallback",
     };
     let center_lock = if state.center_lock {
         tr(ui_language, "켜짐", "On")
@@ -1900,7 +1900,7 @@ fn draw_confirm_panel(
     };
     let backend = match selection.backend {
         RenderBackend::Cpu => "CPU",
-        RenderBackend::Gpu => "GPU",
+        RenderBackend::Gpu => "CPU fallback",
     };
     let braille_profile = match selection.braille_profile {
         BrailleProfile::Safe => "Safe",
@@ -2612,7 +2612,7 @@ fn aspect_preview_ascii(width: u16, height: u16, aspect: f32) -> String {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{backend::TestBackend, Terminal};
 
     fn key(code: KeyCode) -> StartWizardEvent {
         StartWizardEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))

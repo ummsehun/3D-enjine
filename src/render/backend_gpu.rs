@@ -3,11 +3,25 @@ use glam::Mat4;
 use crate::renderer::{Camera, FrameBuffers, GlyphRamp, RenderScratch, RenderStats};
 use crate::scene::{RenderConfig, SceneCpu};
 
+#[cfg(feature = "gpu")]
+use crate::render::gpu::GpuError;
+
 #[derive(Debug)]
 pub enum GpuBackendError {
+    #[cfg(feature = "gpu")]
+    Gpu(GpuError),
+    NotImplemented,
     Unsupported,
 }
 
+#[cfg(feature = "gpu")]
+impl From<GpuError> for GpuBackendError {
+    fn from(e: GpuError) -> Self {
+        Self::Gpu(e)
+    }
+}
+
+#[cfg(feature = "gpu")]
 pub fn render_frame_gpu(
     frame: &mut FrameBuffers,
     config: &RenderConfig,
@@ -20,7 +34,7 @@ pub fn render_frame_gpu(
     camera: Camera,
     model_rotation_y: f32,
 ) -> Result<RenderStats, GpuBackendError> {
-    let _ = (
+    crate::render::gpu::render_frame_gpu(
         frame,
         config,
         scene,
@@ -31,6 +45,22 @@ pub fn render_frame_gpu(
         scratch,
         camera,
         model_rotation_y,
-    );
+    )
+    .map_err(GpuBackendError::from)
+}
+
+#[cfg(not(feature = "gpu"))]
+pub fn render_frame_gpu(
+    _frame: &mut FrameBuffers,
+    _config: &RenderConfig,
+    _scene: &SceneCpu,
+    _global_matrices: &[Mat4],
+    _skin_matrices: &[Vec<Mat4>],
+    _instance_morph_weights: &[Vec<f32>],
+    _glyph_ramp: &GlyphRamp,
+    _scratch: &mut RenderScratch,
+    _camera: Camera,
+    _model_rotation_y: f32,
+) -> Result<RenderStats, GpuBackendError> {
     Err(GpuBackendError::Unsupported)
 }

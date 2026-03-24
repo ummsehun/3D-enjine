@@ -2368,8 +2368,21 @@ fn resolve_runtime_backend(requested: RenderBackend) -> RenderBackend {
     match requested {
         RenderBackend::Cpu => RenderBackend::Cpu,
         RenderBackend::Gpu => {
-            eprintln!("warning: gpu backend is not implemented yet; falling back to cpu.");
-            RenderBackend::Cpu
+            #[cfg(feature = "gpu")]
+            {
+                use crate::render::gpu::GpuRenderer;
+                if GpuRenderer::is_available() {
+                    RenderBackend::Gpu
+                } else {
+                    eprintln!("warning: gpu backend requested but no suitable gpu found; falling back to cpu.");
+                    RenderBackend::Cpu
+                }
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                eprintln!("warning: gpu backend requested but gpu feature not enabled; falling back to cpu.");
+                RenderBackend::Cpu
+            }
         }
     }
 }

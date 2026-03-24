@@ -1,6 +1,6 @@
 use glam::Mat4;
 
-use crate::renderer::{Camera, FrameBuffers, GlyphRamp, RenderScratch, RenderStats, render_frame};
+use crate::renderer::{render_frame, Camera, FrameBuffers, GlyphRamp, RenderScratch, RenderStats};
 use crate::scene::{RenderConfig, SceneCpu};
 
 pub fn render_frame_cpu(

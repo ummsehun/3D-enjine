@@ -6,16 +6,16 @@ use crate::runtime::sync_profile::SyncProfileMode;
 use crate::scene::{
     AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
     CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
-    ClarityProfile, ColorMode, ContrastProfile, DEFAULT_CHARSET, DetailProfile, GraphicsProtocol,
-    KittyCompression, KittyInternalResPreset, KittyPipelineMode, KittyTransport, PerfProfile,
-    RecoverStrategy, RenderBackend, RenderMode, RenderOutputMode, StageRole, SyncPolicy,
-    SyncSpeedMode, TextureSamplerMode, TextureSamplingMode, TextureVOrigin, ThemeStyle,
+    ClarityProfile, ColorMode, ContrastProfile, DetailProfile, GraphicsProtocol, KittyCompression,
+    KittyInternalResPreset, KittyPipelineMode, KittyTransport, PerfProfile, RecoverStrategy,
+    RenderBackend, RenderMode, RenderOutputMode, StageRole, SyncPolicy, SyncSpeedMode,
+    TextureSamplerMode, TextureSamplingMode, TextureVOrigin, ThemeStyle, DEFAULT_CHARSET,
 };
 
 #[derive(Debug, Parser)]
 #[command(name = "terminal-miku3d")]
 #[command(
-    about = "Terminal renderer for ASCII/Braille 3D scenes (CPU + optional GPU experimental)",
+    about = "Terminal renderer for ASCII/Braille 3D scenes (CPU backend; GPU option falls back)",
     long_about = None
 )]
 pub struct Cli {

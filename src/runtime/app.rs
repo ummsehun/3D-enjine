@@ -2368,18 +2368,8 @@ fn resolve_runtime_backend(requested: RenderBackend) -> RenderBackend {
     match requested {
         RenderBackend::Cpu => RenderBackend::Cpu,
         RenderBackend::Gpu => {
-            #[cfg(all(feature = "gpu", target_os = "macos"))]
-            {
-                eprintln!("info: gpu backend enabled (experimental raster stage)");
-                RenderBackend::Gpu
-            }
-            #[cfg(not(all(feature = "gpu", target_os = "macos")))]
-            {
-                eprintln!(
-                    "warning: gpu backend unsupported in current build/platform. fallback to cpu."
-                );
-                RenderBackend::Cpu
-            }
+            eprintln!("warning: gpu backend is not implemented yet; falling back to cpu.");
+            RenderBackend::Cpu
         }
     }
 }

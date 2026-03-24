@@ -1038,6 +1038,9 @@ impl GlyphRamp {
 #[derive(Debug, Default)]
 pub struct RenderScratch {
     projected_vertices: Vec<Option<ProjectedVertex>>,
+    triangle_order: Vec<usize>,
+    triangle_depth_sorted: Vec<(usize, f32)>,
+    subject_depth_cells: Vec<f32>,
     braille_subpixels: BrailleSubpixelBuffers,
     exposure: f32,
     safe_low_visibility_streak: u32,
@@ -1049,6 +1052,9 @@ impl RenderScratch {
     pub fn with_capacity(vertex_capacity: usize) -> Self {
         Self {
             projected_vertices: Vec::with_capacity(vertex_capacity),
+            triangle_order: Vec::new(),
+            triangle_depth_sorted: Vec::new(),
+            subject_depth_cells: Vec::new(),
             braille_subpixels: BrailleSubpixelBuffers::default(),
             exposure: 1.0,
             safe_low_visibility_streak: 0,
@@ -1211,8 +1217,6 @@ fn render_frame_ascii(
     let mut stats = RenderStats::default();
     let mut histogram = [0_u32; 64];
     let mut histogram_count = 0_u32;
-    let mut subject_depth_cells =
-        vec![f32::INFINITY; usize::from(frame.width).saturating_mul(usize::from(frame.height))];
     if let Some((x, y, depth)) = project_root_screen(
         scene,
         global_matrices,
@@ -1272,7 +1276,9 @@ fn render_frame_ascii(
                 exposure,
                 &mut histogram,
                 &mut histogram_count,
-                subject_depth_cells.as_mut_slice(),
+                &mut scratch.triangle_order,
+                &mut scratch.triangle_depth_sorted,
+                scratch.subject_depth_cells.as_mut_slice(),
                 matches!(instance.layer, MeshLayer::Subject),
                 pass,
             );
@@ -1287,7 +1293,7 @@ fn render_frame_ascii(
     apply_visible_metrics(
         &mut stats,
         frame,
-        subject_depth_cells.as_slice(),
+        scratch.subject_depth_cells.as_slice(),
         frame.width,
         frame.height,
     );
@@ -1341,8 +1347,6 @@ fn render_frame_braille(
     let mut histogram = [0_u32; 64];
     let mut histogram_count = 0_u32;
     let mut stats = RenderStats::default();
-    let mut subject_depth_cells =
-        vec![f32::INFINITY; usize::from(frame.width).saturating_mul(usize::from(frame.height))];
     if let Some((x, y, depth)) = project_root_screen(
         scene,
         global_matrices,
@@ -1408,7 +1412,9 @@ fn render_frame_braille(
                 threshold,
                 &mut histogram,
                 &mut histogram_count,
-                subject_depth_cells.as_mut_slice(),
+                &mut scratch.triangle_order,
+                &mut scratch.triangle_depth_sorted,
+                scratch.subject_depth_cells.as_mut_slice(),
                 matches!(instance.layer, MeshLayer::Subject),
                 frame.width,
                 pass,
@@ -1431,7 +1437,7 @@ fn render_frame_braille(
     apply_visible_metrics(
         &mut stats,
         frame,
-        subject_depth_cells.as_slice(),
+        scratch.subject_depth_cells.as_slice(),
         frame.width,
         frame.height,
     );
@@ -1607,6 +1613,8 @@ fn rasterize_mesh(
     exposure: f32,
     histogram: &mut [u32; 64],
     histogram_count: &mut u32,
+    triangle_order: &mut Vec<usize>,
+    triangle_depth_sorted: &mut Vec<(usize, f32)>,
     subject_depth_cells: &mut [f32],
     is_subject_layer: bool,
     pass: RasterPass,
@@ -1649,9 +1657,9 @@ fn rasterize_mesh(
             .min(config.stage_luma_cap.clamp(0.0, 1.0))
     };
 
-    let mut triangle_order = Vec::with_capacity(mesh.indices.len());
+    triangle_order.clear();
     if matches!(pass, RasterPass::Blend) {
-        let mut depth_sorted = Vec::with_capacity(mesh.indices.len());
+        triangle_depth_sorted.clear();
         for (triangle_index, tri) in mesh.indices.iter().enumerate() {
             if triangle_stride > 1 && (triangle_index % triangle_stride) != 0 {
                 continue;
@@ -1664,18 +1672,19 @@ fn rasterize_mesh(
                 continue;
             };
             let avg_depth = (v0.depth + v1.depth + v2.depth) * (1.0 / 3.0);
-            depth_sorted.push((triangle_index, avg_depth));
+            triangle_depth_sorted.push((triangle_index, avg_depth));
         }
-        depth_sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        triangle_order.extend(depth_sorted.into_iter().map(|(idx, _)| idx));
+        triangle_depth_sorted
+            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        triangle_order.extend(triangle_depth_sorted.iter().map(|(idx, _)| *idx));
     } else {
         triangle_order.extend((0..mesh.indices.len()).filter(|triangle_index| {
             triangle_stride <= 1 || (triangle_index % triangle_stride) == 0
         }));
     }
 
-    for triangle_index in triangle_order {
-        let tri = &mesh.indices[triangle_index];
+    for triangle_index in triangle_order.iter() {
+        let tri = &mesh.indices[*triangle_index];
         let (Some(v0), Some(v1), Some(v2)) = (
             projected_vertices.get(tri[0] as usize).copied().flatten(),
             projected_vertices.get(tri[1] as usize).copied().flatten(),
@@ -1816,7 +1825,7 @@ fn rasterize_mesh(
                     }
                     let lighting = shade_lighting(world_normal, world_pos, shading).clamp(0.0, 1.0);
                     let view_dir = (shading.camera_pos - world_pos).normalize_or_zero();
-                    let edge_factor = (1.0 - world_normal.dot(view_dir).abs()).powf(1.6);
+                    let edge_factor = (1.0_f32 - world_normal.dot(view_dir).abs()).powf(1.6_f32);
                     let fog = depth.powf(1.7) * shading.fog_strength * contrast.fog_scale;
                     let base_light = ((lighting
                         + edge_factor * config.edge_accent_strength * 0.22)
@@ -1909,6 +1918,8 @@ fn rasterize_braille_mesh(
     threshold: BrailleThresholds,
     histogram: &mut [u32; 64],
     histogram_count: &mut u32,
+    triangle_order: &mut Vec<usize>,
+    triangle_depth_sorted: &mut Vec<(usize, f32)>,
     subject_depth_cells: &mut [f32],
     is_subject_layer: bool,
     cell_width: u16,
@@ -1952,9 +1963,9 @@ fn rasterize_braille_mesh(
             .min(config.stage_luma_cap.clamp(0.0, 1.0))
     };
 
-    let mut triangle_order = Vec::with_capacity(mesh.indices.len());
+    triangle_order.clear();
     if matches!(pass, RasterPass::Blend) {
-        let mut depth_sorted = Vec::with_capacity(mesh.indices.len());
+        triangle_depth_sorted.clear();
         for (triangle_index, tri) in mesh.indices.iter().enumerate() {
             if triangle_stride > 1 && (triangle_index % triangle_stride) != 0 {
                 continue;
@@ -1967,18 +1978,19 @@ fn rasterize_braille_mesh(
                 continue;
             };
             let avg_depth = (v0.depth + v1.depth + v2.depth) * (1.0 / 3.0);
-            depth_sorted.push((triangle_index, avg_depth));
+            triangle_depth_sorted.push((triangle_index, avg_depth));
         }
-        depth_sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        triangle_order.extend(depth_sorted.into_iter().map(|(idx, _)| idx));
+        triangle_depth_sorted
+            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        triangle_order.extend(triangle_depth_sorted.iter().map(|(idx, _)| *idx));
     } else {
         triangle_order.extend((0..mesh.indices.len()).filter(|triangle_index| {
             triangle_stride <= 1 || (triangle_index % triangle_stride) == 0
         }));
     }
 
-    for triangle_index in triangle_order {
-        let tri = &mesh.indices[triangle_index];
+    for triangle_index in triangle_order.iter() {
+        let tri = &mesh.indices[*triangle_index];
         let (Some(v0), Some(v1), Some(v2)) = (
             projected_vertices.get(tri[0] as usize).copied().flatten(),
             projected_vertices.get(tri[1] as usize).copied().flatten(),
@@ -2121,7 +2133,7 @@ fn rasterize_braille_mesh(
                     }
                     let lighting = shade_lighting(world_normal, world_pos, shading).clamp(0.0, 1.0);
                     let view_dir = (shading.camera_pos - world_pos).normalize_or_zero();
-                    let edge_factor = (1.0 - world_normal.dot(view_dir).abs()).powf(1.6);
+                    let edge_factor = (1.0_f32 - world_normal.dot(view_dir).abs()).powf(1.6_f32);
                     let fog = depth.powf(1.7) * shading.fog_strength * contrast.fog_scale;
                     let base_light = ((lighting
                         + edge_factor * config.edge_accent_strength * 0.22)

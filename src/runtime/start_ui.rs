@@ -23,7 +23,10 @@ use rodio::{Decoder, Source};
 
 use crate::{
     loader,
-    runtime::{config::UiLanguage, terminal::RatatuiSession},
+    runtime::{
+        config::UiLanguage,
+        terminal::{RatatuiSession, TerminalProfile},
+    },
     scene::{
         estimate_cell_aspect_from_window, resolve_cell_aspect, AnsiQuantization, AudioReactiveMode,
         BrailleProfile, CameraAlignPreset, CameraControlMode, CameraFocusMode, CameraMode,
@@ -1144,7 +1147,7 @@ pub fn run_start_wizard(
         .collect::<Vec<_>>();
     let stage_entries = stage_entries.to_vec();
 
-    let mut terminal = RatatuiSession::enter()?;
+    let mut terminal = RatatuiSession::enter_with_profile(TerminalProfile::detect())?;
     let (width, height) = terminal.size()?;
     let mut state = StartWizardState::new(
         model_entries,

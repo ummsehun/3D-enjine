@@ -22,6 +22,38 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalProfile {
+    pub is_ghostty: bool,
+    pub supports_truecolor: bool,
+    pub use_alt_screen: bool,
+    pub use_sync_updates: bool,
+}
+
+impl TerminalProfile {
+    pub fn detect() -> Self {
+        let is_ghostty = std::env::var("TERM_PROGRAM")
+            .map(|v| v.eq_ignore_ascii_case("ghostty"))
+            .unwrap_or(false);
+        let use_alt_screen = if is_ghostty {
+            true
+        } else {
+            should_use_alt_screen()
+        };
+        let use_sync_updates = if is_ghostty {
+            true
+        } else {
+            should_use_sync_updates()
+        };
+        Self {
+            is_ghostty,
+            supports_truecolor: supports_truecolor(),
+            use_alt_screen,
+            use_sync_updates,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentMode {
     Diff,
     FullFallback,
@@ -53,8 +85,12 @@ pub struct TerminalSession {
 
 impl TerminalSession {
     pub fn enter() -> Result<Self> {
+        Self::enter_with_profile(TerminalProfile::detect())
+    }
+
+    pub fn enter_with_profile(profile: TerminalProfile) -> Result<Self> {
         ensure_tty()?;
-        let alt_screen = should_use_alt_screen();
+        let alt_screen = profile.use_alt_screen;
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         if alt_screen {
@@ -68,7 +104,7 @@ impl TerminalSession {
             cursor_hidden: true,
             raw_mode: true,
             presenter: TerminalPresenter::default(),
-            sync_updates: should_use_sync_updates(),
+            sync_updates: profile.use_sync_updates,
         })
     }
 
@@ -331,8 +367,12 @@ pub struct RatatuiSession {
 
 impl RatatuiSession {
     pub fn enter() -> Result<Self> {
+        Self::enter_with_profile(TerminalProfile::detect())
+    }
+
+    pub fn enter_with_profile(profile: TerminalProfile) -> Result<Self> {
         ensure_tty()?;
-        let alt_screen = should_use_alt_screen();
+        let alt_screen = profile.use_alt_screen;
         enable_raw_mode()?;
 
         let mut stdout = io::stdout();

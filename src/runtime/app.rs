@@ -54,7 +54,7 @@ use crate::{
         RenderOutputMode, SceneCpu, StageRole, SyncPolicy, SyncSpeedMode, TextureSamplingMode,
         ThemeStyle,
     },
-    terminal::{supports_truecolor, PresentMode, TerminalSession},
+    terminal::{PresentMode, TerminalProfile, TerminalSession},
 };
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -2473,8 +2473,9 @@ fn run_scene_interactive(
 ) -> Result<()> {
     config.backend = resolve_runtime_backend(config.backend);
     let startup_graphics_notice = normalize_graphics_settings(&mut config);
-    let _truecolor_supported = supports_truecolor();
-    let mut terminal = TerminalSession::enter()?;
+    let terminal_profile = TerminalProfile::detect();
+    let _truecolor_supported = terminal_profile.supports_truecolor;
+    let mut terminal = TerminalSession::enter_with_profile(terminal_profile)?;
     terminal.set_present_mode(PresentMode::Diff);
     let (term_width, term_height) = validated_terminal_size(&terminal)?;
     let (display_width, display_height, scaled) = cap_render_size(term_width, term_height);
@@ -2517,6 +2518,7 @@ fn run_scene_interactive(
     let mut center_lock_enabled = config.center_lock;
     let center_lock_mode = config.center_lock_mode;
     let mut stage_level = config.stage_level.min(4);
+    let mut gpu_renderer_state = crate::render::backend_gpu::GpuRendererState::default();
     let mut requested_color_mode =
         resolve_effective_color_mode(config.mode, config.color_mode, config.ascii_force_color);
     let ascii_force_color_active = config.ascii_force_color;
@@ -2546,6 +2548,7 @@ fn run_scene_interactive(
     let mut resize_recovery_pending = false;
     let mut center_lock_restore_after_freefly = center_lock_enabled;
     let mut io_failure_count: u8 = 0;
+    let mut ghostty_zoom_repaint_due: Option<Instant> = None;
     let profile_state_hint = sync_profile.as_ref().map(|profile| {
         if profile.hit {
             "profile=hit"
@@ -3010,11 +3013,26 @@ fn run_scene_interactive(
             jitter_scale,
         );
         let effective_zoom = (user_zoom * screen_fit.auto_zoom_gain).clamp(0.20, 8.0);
-        let repaint_due_to_zoom = (effective_zoom - 1.0).abs() > 0.12
+        let zoom_repaint_threshold = if terminal_profile.is_ghostty {
+            0.20
+        } else {
+            0.12
+        };
+        let repaint_due_to_zoom = (effective_zoom - 1.0).abs() > zoom_repaint_threshold
             || focus_offset.length_squared() > 0.01
             || camera_height_offset.abs() > 0.01;
         if repaint_due_to_zoom {
+            if terminal_profile.is_ghostty {
+                ghostty_zoom_repaint_due = Some(Instant::now() + Duration::from_millis(45));
+            } else {
+                terminal.force_full_repaint();
+            }
+        }
+        if terminal_profile.is_ghostty
+            && ghostty_zoom_repaint_due.is_some_and(|due| Instant::now() >= due)
+        {
             terminal.force_full_repaint();
+            ghostty_zoom_repaint_due = None;
         }
         let auto_radius_shrink = auto_radius_guard.shrink_ratio;
         if !center_lock_enabled || matches!(runtime_camera.control_mode, CameraControlMode::FreeFly)
@@ -3106,6 +3124,7 @@ fn run_scene_interactive(
         frame_config.far = dyn_far;
 
         let stats = render_frame_with_backend(
+            &mut gpu_renderer_state,
             &mut frame,
             &frame_config,
             &scene,
@@ -4253,7 +4272,7 @@ fn apply_startup_font_config(runtime_cfg: &GasciiConfig) {
 }
 
 fn run_ghostty_font_shortcut(key: &str) {
-    if !running_in_ghostty() {
+    if !TerminalProfile::detect().is_ghostty {
         return;
     }
     #[cfg(target_os = "macos")]
@@ -4273,12 +4292,6 @@ fn run_ghostty_font_shortcut(key: &str) {
     {
         let _ = key;
     }
-}
-
-fn running_in_ghostty() -> bool {
-    std::env::var("TERM_PROGRAM")
-        .map(|v| v.eq_ignore_ascii_case("ghostty"))
-        .unwrap_or(false)
 }
 
 struct MusicPlayback {
@@ -5030,6 +5043,7 @@ fn bench(args: BenchArgs) -> Result<()> {
     let glyph_ramp = GlyphRamp::from_config(&config);
     let mut render_scratch = RenderScratch::with_capacity(max_scene_vertices(&scene));
     let camera = Camera::default();
+    let mut gpu_renderer_state = crate::render::backend_gpu::GpuRendererState::default();
 
     let benchmark_duration = Duration::from_secs_f32(args.seconds.max(0.1));
     let started = Instant::now();
@@ -5041,6 +5055,7 @@ fn bench(args: BenchArgs) -> Result<()> {
         let elapsed = started.elapsed().as_secs_f32();
         pipeline.prepare_frame(&scene, elapsed, animation_index);
         let stats = render_frame_with_backend(
+            &mut gpu_renderer_state,
             &mut frame,
             &config,
             &scene,

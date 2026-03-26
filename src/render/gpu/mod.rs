@@ -511,7 +511,7 @@ impl GpuRenderer {
                     Self::focus_lod_bias(config),
                     material
                         .texture_index
-                        .and_then(|tex_idx| scene.textures.get(tex_idx))
+                    .and_then(|tex_idx| scene.textures.get(tex_idx))
                         .map(|texture| texture.mip_levels.len() as f32)
                         .unwrap_or(0.0),
                     0.0,
@@ -846,7 +846,9 @@ fn count_gpu_triangles(scene: &SceneCpu, config: &RenderConfig) -> usize {
             .and_then(|material_index| scene.materials.get(material_index))
             .map(|material| material.alpha_mode)
             .unwrap_or(MaterialAlphaMode::Opaque);
-        if matches!(instance.layer, MeshLayer::Stage) && matches!(alpha_mode, MaterialAlphaMode::Blend) {
+        if matches!(instance.layer, MeshLayer::Stage)
+            && matches!(alpha_mode, MaterialAlphaMode::Blend)
+        {
             continue;
         }
         total = total.saturating_add(mesh.indices.len());

@@ -6,10 +6,10 @@ use crate::runtime::sync_profile::SyncProfileMode;
 use crate::scene::{
     AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
     CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
-    ClarityProfile, ColorMode, ContrastProfile, DEFAULT_CHARSET, DetailProfile, GraphicsProtocol,
-    KittyCompression, KittyInternalResPreset, KittyPipelineMode, KittyTransport, PerfProfile,
-    RecoverStrategy, RenderBackend, RenderMode, RenderOutputMode, StageRole, SyncPolicy,
-    SyncSpeedMode, TextureSamplerMode, TextureSamplingMode, TextureVOrigin, ThemeStyle,
+    ClarityProfile, ColorMode, ContrastProfile, DetailProfile, GraphicsProtocol, KittyCompression,
+    KittyInternalResPreset, KittyPipelineMode, KittyTransport, PerfProfile, RecoverStrategy,
+    RenderBackend, RenderMode, RenderOutputMode, StageRole, SyncPolicy, SyncSpeedMode,
+    TextureSamplerMode, TextureSamplingMode, TextureVOrigin, ThemeStyle, DEFAULT_CHARSET,
 };
 
 #[derive(Debug, Parser)]
@@ -44,6 +44,12 @@ pub struct StartArgs {
     /// Directory to scan for .glb/.gltf files.
     #[arg(long, default_value = "assets/glb")]
     pub dir: PathBuf,
+    /// Directory to scan for .pmx files (recursively).
+    #[arg(long, default_value = "assets/pmx")]
+    pub pmx_dir: PathBuf,
+    /// Directory to scan for PMX motion .vmd files.
+    #[arg(long, default_value = "assets/vmd")]
+    pub motion_dir: PathBuf,
     /// Directory to scan for .mp3/.wav files.
     #[arg(long, default_value = "assets/music")]
     pub music_dir: PathBuf,

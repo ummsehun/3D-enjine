@@ -13,6 +13,7 @@ pub fn render_frame_with_backend(
     global_matrices: &[Mat4],
     skin_matrices: &[Vec<Mat4>],
     instance_morph_weights: &[Vec<f32>],
+    material_morph_weights: &[f32],
     glyph_ramp: &GlyphRamp,
     scratch: &mut RenderScratch,
     camera: Camera,
@@ -26,6 +27,7 @@ pub fn render_frame_with_backend(
             global_matrices,
             skin_matrices,
             instance_morph_weights,
+            material_morph_weights,
             glyph_ramp,
             scratch,
             camera,
@@ -57,6 +59,7 @@ pub fn render_frame_with_backend(
                     global_matrices,
                     skin_matrices,
                     instance_morph_weights,
+                    material_morph_weights,
                     glyph_ramp,
                     scratch,
                     camera,
@@ -190,6 +193,7 @@ mod tests {
             joints4: None,
             weights4: None,
             morph_targets: vec![MorphTargetCpu {
+                name: Some("lift".to_owned()),
                 position_deltas: vec![
                     Vec3::new(0.0, 0.0, 0.0),
                     Vec3::new(0.0, 0.15, 0.0),
@@ -239,6 +243,7 @@ mod tests {
             ],
             animations: Vec::new(),
             root_center_node: Some(0),
+            pmx_rig_meta: None,
         }
     }
 
@@ -303,6 +308,7 @@ mod tests {
             }],
             animations: Vec::new(),
             root_center_node: Some(0),
+            pmx_rig_meta: None,
         }
     }
 

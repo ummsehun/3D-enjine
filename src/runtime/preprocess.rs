@@ -5,9 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use image::{DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Rgba, RgbaImage, imageops};
+use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use image::{imageops, DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Rgba, RgbaImage};
 use serde_json::Value;
 
 use crate::runtime::cli::{PreprocessArgs, PreprocessPresetArg};

@@ -5,14 +5,15 @@ CPU-first terminal renderer for 3D meshes/animations (ASCII/Braille) with option
 ## Features
 
 - Software rasterizer (projection + triangle rasterization + z-buffer)
-- GLB/glTF + OBJ loading
+- GLB/glTF + OBJ + PMX model loading
+- PMX + VMD direct runtime branch (`cargo start` / `run`)
 - GLB material color pipeline (`baseColorFactor` + `COLOR_0` + `TEXCOORD_0` + texture sampling)
 - `KHR_texture_transform` 반영(`baseColorTexture` UV transform/texCoord override)
 - `preprocess` 서브커맨드(GLB 텍스처 업스케일/샤프닝, 원본 보존)
 - 곡/카메라 조합별 sync profile 자동 적용/저장(`assets/sync/profiles.json`)
 - Skeletal animation playback (glTF skin)
 - Morph target(표정) 애니메이션 재생 (`weights` 채널)
-- `cargo start` Ratatui 단계형 위저드 (Model → Music → Stage → Camera → Render → Aspect → Confirm)
+- `cargo start` Ratatui 분기형 위저드 (GLB / PMX+VMD, Motion 단계 포함)
 - `rodio` 기반 BGM 루프 재생 (`mp3`/`wav`)
 - 오디오 시계 기반 애니메이션 동기화 + 오프셋 보정
 - 자동 셀 비율 추정 + 비율 캘리브레이션
@@ -67,20 +68,22 @@ cargo run -- bench --scene glb-anim --glb /path/to/model.glb --anim 0 --seconds 
 
 ## Start Wizard (Ratatui)
 
-`cargo start`는 `assets/glb` + `assets/music` + `assets/stage` + `assets/camera`를 스캔하고 7단계 위저드를 엽니다.
+`cargo start`는 `assets/glb` + `assets/music` + `assets/stage` + `assets/camera`를 스캔하고 브랜치형 위저드를 엽니다.
 
-1. 모델 선택
-2. 음악 선택 (`없음` 포함)
-3. 스테이지 선택 (`스테이지를 선택해 주세요`, 상태 배지 표시)
-4. 카메라 선택 (`없음`/`*.vmd` + `mode` + `align preset` + `unit scale`)
-5. 렌더 옵션 (`모드`, `성능/디테일/선명도 프로필`, `ANSI 양자화`, `백엔드`, `중앙 고정/기준`, `WASD 모드/속도`, `카메라 포커스`, `재질색상/텍스처 샘플링`, `model_lift`, `edge_accent`, `스테이지 레벨`, `FPS`, `대비`, `동기화`, `비율 모드`, `폰트 프리셋`)
-6. 비율 캘리브레이션 (원형 프리뷰 + trim 조절)
-7. 확인/실행 (모델/음악/스테이지/카메라 상태, 감지/적용 비율, clip/audio 길이, speed factor 표시)
+1. 브랜치 선택 (`GLB` / `PMX + VMD`)
+2. 모델 선택
+3. 모션 선택 (`PMX + VMD` 브랜치에서만 표시)
+4. 음악 선택 (`없음` 포함)
+5. 스테이지 선택 (`스테이지를 선택해 주세요`, 상태 배지 표시)
+6. 카메라 선택 (`없음`/`*.vmd` + `mode` + `align preset` + `unit scale`)
+7. 렌더 옵션 (`모드`, `성능/디테일/선명도 프로필`, `ANSI 양자화`, `백엔드`, `중앙 고정/기준`, `WASD 모드/속도`, `카메라 포커스`, `재질색상/텍스처 샘플링`, `model_lift`, `edge_accent`, `스테이지 레벨`, `FPS`, `대비`, `동기화`, `비율 모드`, `폰트 프리셋`)
+8. 비율 캘리브레이션 (원형 프리뷰 + trim 조절)
+9. 확인/실행 (모델/모션/음악/스테이지/카메라 상태, 감지/적용 비율, clip/audio 길이, speed factor 표시)
 
 공통 키:
 
 - `Enter`: 현재 단계 확정/다음
-- `Esc`: 이전 단계 (1단계에서는 취소)
+- `Esc`: 이전 단계 (브랜치 단계에서는 취소)
 - `q`: 즉시 취소
 - `Tab` / `Shift+Tab`: 보조 포커스/이동
 
@@ -253,6 +256,7 @@ min_triangle_area_px2 = 0.08
 - `sync_profile_mode=auto|write`에서 런타임 중 `,` `.` `/`로 오프셋을 조정하면 종료 시 `assets/sync/profiles.json`에 write-back 됩니다.
 - 오디오 초기화 실패 시 렌더링은 계속 진행되며 무음으로 동작합니다.
 - 시작 위저드에서 스테이지를 선택할 수 있으며, `PMX 변환 필요` 항목은 실행 시 차단 + 변환 안내를 출력합니다.
+- PMX 모델 + VMD 모션은 `cargo start`의 첫 브랜치 선택에서 바로 로드할 수 있습니다.
 - 스테이지 디렉터리의 PMX 항목은 여전히 GLB로 변환해야 합니다. Blender + MMD Tools로 GLB로 변환한 뒤 같은 `{dir}`에 두면 `사용 가능`으로 자동 전환됩니다.
 - 직접 PMX 파일을 열려면 `cargo run -- run --scene pmx --pmx /path/to/model.pmx`를 사용하세요.
 
@@ -308,6 +312,6 @@ min_triangle_area_px2 = 0.08
 
 - Repository에는 모델/모션 자산을 포함하지 않습니다.
 - 로컬 자산(`assets-local/`) 기준으로 실행하세요.
-- PMX/VMD는 오프라인에서 GLB로 변환 후 사용하세요.
+- PMX 모델 + VMD 모션은 직접 로드할 수 있고, 스테이지 PMX는 여전히 GLB로 변환해야 합니다.
 - 변환 가이드는 `/Users/user/miku/scripts/convert_mmd_to_glb.md` 참고.
 - 웹 브릿지/변환 기준 문서는 `/Users/user/miku/docs/web_import_bridge.md` 참고.

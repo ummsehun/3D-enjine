@@ -1,5 +1,6 @@
 use glam::Mat4;
 
+use crate::engine::pmx_rig::{compute_bone_position, solve_ik_chain_ccd};
 use crate::{animation::ChannelTarget, scene::NodePose};
 use crate::{
     animation::{
@@ -12,6 +13,7 @@ pub struct FramePipeline {
     poses: Vec<NodePose>,
     node_morph_weights: Vec<Vec<f32>>,
     instance_morph_weights: Vec<Vec<f32>>,
+    material_morph_weights: Vec<f32>,
     globals: Vec<Mat4>,
     globals_visited: Vec<bool>,
     skin_matrices: Vec<Vec<Mat4>>,
@@ -24,6 +26,7 @@ impl FramePipeline {
             poses: Vec::with_capacity(scene.nodes.len()),
             node_morph_weights: Vec::with_capacity(scene.nodes.len()),
             instance_morph_weights: Vec::with_capacity(scene.mesh_instances.len()),
+            material_morph_weights: vec![0.0; scene.material_morphs.len()],
             globals: Vec::with_capacity(scene.nodes.len()),
             globals_visited: Vec::with_capacity(scene.nodes.len()),
             skin_matrices: Vec::with_capacity(scene.skins.len()),
@@ -39,6 +42,7 @@ impl FramePipeline {
     ) {
         reset_poses_from_nodes(&scene.nodes, &mut self.poses);
         seed_node_morph_weights(scene, &mut self.node_morph_weights);
+        self.material_morph_weights.fill(0.0);
         let mut primary_normalized_time = None;
         if let Some(index) = anim_index {
             if let Some(clip) = scene.animations.get(index) {
@@ -46,6 +50,7 @@ impl FramePipeline {
                     elapsed_seconds,
                     &mut self.poses,
                     &mut self.node_morph_weights,
+                    &mut self.material_morph_weights,
                 );
                 primary_normalized_time =
                     Some(normalized_clip_time(elapsed_seconds, clip.duration));
@@ -59,8 +64,25 @@ impl FramePipeline {
                 Some(primary_t) if clip.duration > f32::EPSILON => primary_t * clip.duration,
                 _ => elapsed_seconds,
             };
-            clip.sample_into_with_morph(sample_time, &mut self.poses, &mut self.node_morph_weights);
+            clip.sample_into_with_morph(
+                sample_time,
+                &mut self.poses,
+                &mut self.node_morph_weights,
+                &mut self.material_morph_weights,
+            );
         }
+
+        // PMX IK solve: adjust joint rotations after animation sampling
+        if let Some(rig_meta) = &scene.pmx_rig_meta {
+            for chain in &rig_meta.ik_chains {
+                // For MVP, use the current effector position as target
+                // In full MMD, there would be separate IK target bones animated
+                let target_pos =
+                    compute_bone_position(chain.target_bone_index, &scene.nodes, &self.poses);
+                solve_ik_chain_ccd(chain, &scene.nodes, &mut self.poses, target_pos);
+            }
+        }
+
         compute_global_matrices_in_place(
             &scene.nodes,
             &self.poses,
@@ -85,6 +107,10 @@ impl FramePipeline {
 
     pub fn morph_weights_by_instance(&self) -> &[Vec<f32>] {
         &self.instance_morph_weights
+    }
+
+    pub fn material_morph_weights(&self) -> &[f32] {
+        &self.material_morph_weights
     }
 
     pub fn text_buffer_mut(&mut self) -> &mut String {
@@ -161,6 +187,7 @@ mod tests {
             joints4: None,
             weights4: None,
             morph_targets: vec![MorphTargetCpu {
+                name: Some("smile".to_owned()),
                 position_deltas: vec![Vec3::new(0.0, 1.0, 0.0)],
                 normal_deltas: vec![Vec3::ZERO],
             }],
@@ -207,6 +234,8 @@ mod tests {
             }],
             animations: vec![primary, facial],
             root_center_node: Some(0),
+            pmx_rig_meta: None,
+            material_morphs: Vec::new(),
         };
 
         let mut pipeline = FramePipeline::new(&scene);

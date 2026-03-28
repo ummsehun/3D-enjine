@@ -45,8 +45,16 @@ const SYNC_OFFSET_LIMIT_MS: i32 = 5_000;
 const RATATUI_SAFE_MAX_CELLS: u32 = (u16::MAX as u32) - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelBranch {
+    Glb,
+    PmxVmd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartWizardStep {
+    Branch,
     Model,
+    Motion,
     Music,
     Stage,
     Camera,
@@ -58,13 +66,15 @@ pub enum StartWizardStep {
 impl StartWizardStep {
     fn index(self) -> usize {
         match self {
-            StartWizardStep::Model => 0,
-            StartWizardStep::Music => 1,
-            StartWizardStep::Stage => 2,
-            StartWizardStep::Camera => 3,
-            StartWizardStep::Render => 4,
-            StartWizardStep::AspectCalib => 5,
-            StartWizardStep::Confirm => 6,
+            StartWizardStep::Branch => 0,
+            StartWizardStep::Model => 1,
+            StartWizardStep::Motion => 2,
+            StartWizardStep::Music => 3,
+            StartWizardStep::Stage => 4,
+            StartWizardStep::Camera => 5,
+            StartWizardStep::Render => 6,
+            StartWizardStep::AspectCalib => 7,
+            StartWizardStep::Confirm => 8,
         }
     }
 }
@@ -211,7 +221,10 @@ impl Default for StartWizardDefaults {
 
 #[derive(Debug, Clone)]
 pub struct StartSelection {
+    pub branch: ModelBranch,
     pub glb_path: PathBuf,
+    pub pmx_path: Option<PathBuf>,
+    pub motion_vmd_path: Option<PathBuf>,
     pub music_path: Option<PathBuf>,
     pub mode: RenderMode,
     pub output_mode: RenderOutputMode,
@@ -288,11 +301,15 @@ impl StartEntry {
 #[derive(Debug, Clone)]
 struct StartWizardState {
     step: StartWizardStep,
+    branch: ModelBranch,
     model_entries: Vec<StartEntry>,
+    pmx_entries: Vec<StartEntry>,
+    motion_entries: Vec<StartEntry>,
     music_entries: Vec<StartEntry>,
     stage_entries: Vec<StageChoice>,
     camera_entries: Vec<StartEntry>,
     model_index: usize,
+    motion_index: usize,
     music_index: usize,
     stage_index: usize,
     camera_index: usize,
@@ -350,6 +367,8 @@ struct StartWizardState {
 impl StartWizardState {
     fn new(
         model_entries: Vec<StartEntry>,
+        pmx_entries: Vec<StartEntry>,
+        motion_entries: Vec<StartEntry>,
         music_entries: Vec<StartEntry>,
         stage_entries: Vec<StageChoice>,
         camera_entries: Vec<StartEntry>,
@@ -368,12 +387,16 @@ impl StartWizardState {
             })
             .unwrap_or(0);
         Self {
-            step: StartWizardStep::Model,
+            step: StartWizardStep::Branch,
+            branch: ModelBranch::Glb,
             model_entries,
+            pmx_entries,
+            motion_entries,
             music_entries,
             stage_entries,
             camera_entries,
             model_index: 0,
+            motion_index: 0,
             music_index: 0,
             stage_index: 0,
             camera_index,
@@ -495,7 +518,9 @@ impl StartWizardState {
         }
 
         match self.step {
+            StartWizardStep::Branch => self.apply_branch_key(key),
             StartWizardStep::Model => self.apply_model_key(key),
+            StartWizardStep::Motion => self.apply_motion_key(key),
             StartWizardStep::Music => self.apply_music_key(key),
             StartWizardStep::Stage => self.apply_stage_key(key),
             StartWizardStep::Camera => self.apply_camera_key(key),
@@ -506,20 +531,76 @@ impl StartWizardState {
     }
 
     fn apply_model_key(&mut self, key: KeyEvent) -> StartWizardAction {
+        let model_len = match self.branch {
+            ModelBranch::Glb => self.model_entries.len(),
+            ModelBranch::PmxVmd => self.pmx_entries.len(),
+        };
         match key.code {
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
-                cycle_index(&mut self.model_index, self.model_entries.len(), -1);
+                cycle_index(&mut self.model_index, model_len, -1);
                 StartWizardAction::Continue
             }
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
-                cycle_index(&mut self.model_index, self.model_entries.len(), 1);
+                cycle_index(&mut self.model_index, model_len, 1);
+                StartWizardAction::Continue
+            }
+            KeyCode::Enter => {
+                self.step = if matches!(self.branch, ModelBranch::PmxVmd) {
+                    StartWizardStep::Motion
+                } else {
+                    StartWizardStep::Music
+                };
+                StartWizardAction::Continue
+            }
+            KeyCode::Esc => StartWizardAction::Cancel,
+            _ => StartWizardAction::Continue,
+        }
+    }
+
+    fn apply_branch_key(&mut self, key: KeyEvent) -> StartWizardAction {
+        match key.code {
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') => {
+                self.branch = match self.branch {
+                    ModelBranch::Glb => ModelBranch::PmxVmd,
+                    ModelBranch::PmxVmd => ModelBranch::Glb,
+                };
+                StartWizardAction::Continue
+            }
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('l') | KeyCode::Char('j') => {
+                self.branch = match self.branch {
+                    ModelBranch::Glb => ModelBranch::PmxVmd,
+                    ModelBranch::PmxVmd => ModelBranch::Glb,
+                };
+                StartWizardAction::Continue
+            }
+            KeyCode::Enter => {
+                self.step = StartWizardStep::Model;
+                StartWizardAction::Continue
+            }
+            KeyCode::Esc => StartWizardAction::Cancel,
+            _ => StartWizardAction::Continue,
+        }
+    }
+
+    fn apply_motion_key(&mut self, key: KeyEvent) -> StartWizardAction {
+        let motion_len = self.motion_entries.len() + 1;
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                cycle_index(&mut self.motion_index, motion_len, -1);
+                StartWizardAction::Continue
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                cycle_index(&mut self.motion_index, motion_len, 1);
                 StartWizardAction::Continue
             }
             KeyCode::Enter => {
                 self.step = StartWizardStep::Music;
                 StartWizardAction::Continue
             }
-            KeyCode::Esc => StartWizardAction::Cancel,
+            KeyCode::Esc => {
+                self.step = StartWizardStep::Model;
+                StartWizardAction::Continue
+            }
             _ => StartWizardAction::Continue,
         }
     }
@@ -670,7 +751,9 @@ impl StartWizardState {
 
     fn tab_forward(&mut self) {
         match self.step {
+            StartWizardStep::Branch => self.step = StartWizardStep::Model,
             StartWizardStep::Model => self.step = StartWizardStep::Music,
+            StartWizardStep::Motion => self.step = StartWizardStep::Music,
             StartWizardStep::Music => self.step = StartWizardStep::Stage,
             StartWizardStep::Stage => self.step = StartWizardStep::Camera,
             StartWizardStep::Camera => self.step = StartWizardStep::Render,
@@ -688,7 +771,9 @@ impl StartWizardState {
 
     fn tab_backward(&mut self) {
         match self.step {
+            StartWizardStep::Branch => {}
             StartWizardStep::Model => {}
+            StartWizardStep::Motion => self.step = StartWizardStep::Model,
             StartWizardStep::Music => self.step = StartWizardStep::Model,
             StartWizardStep::Stage => self.step = StartWizardStep::Music,
             StartWizardStep::Camera => self.step = StartWizardStep::Stage,
@@ -933,14 +1018,24 @@ impl StartWizardState {
     }
 
     fn selection(&self) -> StartSelection {
-        let glb_path = self.model_entries[self.model_index].path.clone();
+        let active_model_path = self.selected_model_path().cloned().unwrap_or_default();
+        let glb_path = active_model_path.clone();
+        let pmx_path = if matches!(self.branch, ModelBranch::PmxVmd) {
+            Some(active_model_path.clone())
+        } else {
+            None
+        };
+        let motion_vmd_path = self.selected_motion_path().cloned();
         let stage_choice = self.selected_stage_choice();
         let stage_transform = stage_choice
             .as_ref()
             .map(|choice| choice.transform)
             .unwrap_or_default();
         StartSelection {
+            branch: self.branch,
             glb_path,
+            pmx_path,
+            motion_vmd_path,
             music_path: self.selected_music_path().cloned(),
             mode: self.mode,
             output_mode: self.output_mode,
@@ -996,6 +1091,19 @@ impl StartWizardState {
         }
     }
 
+    fn selected_model_path(&self) -> Option<&PathBuf> {
+        match self.branch {
+            ModelBranch::Glb => self
+                .model_entries
+                .get(self.model_index)
+                .map(|entry| &entry.path),
+            ModelBranch::PmxVmd => self
+                .pmx_entries
+                .get(self.model_index)
+                .map(|entry| &entry.path),
+        }
+    }
+
     fn selected_music_path(&self) -> Option<&PathBuf> {
         if self.music_index == 0 {
             None
@@ -1026,9 +1134,26 @@ impl StartWizardState {
         }
     }
 
+    fn selected_motion_path(&self) -> Option<&PathBuf> {
+        if !matches!(self.branch, ModelBranch::PmxVmd) || self.motion_index == 0 {
+            None
+        } else {
+            self.motion_entries
+                .get(self.motion_index.saturating_sub(1))
+                .map(|entry| &entry.path)
+        }
+    }
+
     fn selected_clip_duration_secs(&self) -> Option<f32> {
-        let path = self.model_entries.get(self.model_index)?.path.clone();
-        self.clip_duration_cache.get(&path).and_then(|value| *value)
+        match self.branch {
+            ModelBranch::Glb => {
+                let path = self.model_entries.get(self.model_index)?.path.clone();
+                self.clip_duration_cache.get(&path).and_then(|value| *value)
+            }
+            ModelBranch::PmxVmd => self
+                .selected_motion_path()
+                .and_then(|path| inspect_motion_duration(path)),
+        }
     }
 
     fn selected_audio_duration_secs(&self) -> Option<f32> {
@@ -1118,10 +1243,14 @@ enum StartWizardAction {
 
 pub fn run_start_wizard(
     model_dir: &Path,
+    pmx_dir: &Path,
+    motion_dir: &Path,
     music_dir: &Path,
     stage_dir: &Path,
     camera_dir: &Path,
     model_files: &[PathBuf],
+    pmx_files: &[PathBuf],
+    motion_files: &[PathBuf],
     music_files: &[PathBuf],
     camera_files: &[PathBuf],
     stage_entries: &[StageChoice],
@@ -1134,6 +1263,14 @@ pub fn run_start_wizard(
     }
 
     let model_entries = model_files
+        .iter()
+        .map(|path| StartEntry::from_path(path))
+        .collect::<Vec<_>>();
+    let pmx_entries = pmx_files
+        .iter()
+        .map(|path| StartEntry::from_path(path))
+        .collect::<Vec<_>>();
+    let motion_entries = motion_files
         .iter()
         .map(|path| StartEntry::from_path(path))
         .collect::<Vec<_>>();
@@ -1151,6 +1288,8 @@ pub fn run_start_wizard(
     let (width, height) = terminal.size()?;
     let mut state = StartWizardState::new(
         model_entries,
+        pmx_entries,
+        motion_entries,
         music_entries,
         stage_entries,
         camera_entries,
@@ -1168,6 +1307,8 @@ pub fn run_start_wizard(
                 draw_start_wizard(
                     frame,
                     model_dir,
+                    pmx_dir,
+                    motion_dir,
                     music_dir,
                     stage_dir,
                     camera_dir,
@@ -1246,6 +1387,8 @@ fn draw_unsafe_size_fallback(width: u16, height: u16, lang: UiLanguage) -> Resul
 fn draw_start_wizard(
     frame: &mut Frame,
     model_dir: &Path,
+    pmx_dir: &Path,
+    motion_dir: &Path,
     music_dir: &Path,
     stage_dir: &Path,
     camera_dir: &Path,
@@ -1285,6 +1428,8 @@ fn draw_start_wizard(
                 frame,
                 body[1],
                 model_dir,
+                pmx_dir,
+                motion_dir,
                 music_dir,
                 stage_dir,
                 camera_dir,
@@ -1302,6 +1447,8 @@ fn draw_start_wizard(
                 frame,
                 body[1],
                 model_dir,
+                pmx_dir,
+                motion_dir,
                 music_dir,
                 stage_dir,
                 camera_dir,
@@ -1324,7 +1471,9 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &StartWizardState, ui_langu
         "Terminal Miku 3D Setup",
     );
     let step_name = match state.step {
+        StartWizardStep::Branch => tr(ui_language, "브랜치 선택", "Branch"),
         StartWizardStep::Model => tr(ui_language, "모델 선택", "Model"),
+        StartWizardStep::Motion => tr(ui_language, "모션 선택", "Motion"),
         StartWizardStep::Music => tr(ui_language, "음악 선택", "Music"),
         StartWizardStep::Stage => tr(ui_language, "스테이지 선택", "Stage"),
         StartWizardStep::Camera => tr(ui_language, "카메라 선택", "Camera"),
@@ -1335,7 +1484,7 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &StartWizardState, ui_langu
     let line = Line::from(vec![
         Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("  •  "),
-        Span::raw(format!("{} {}/7", step_name, state.step.index() + 1)),
+        Span::raw(format!("{} {}/9", step_name, state.step.index() + 1)),
     ]);
 
     let para = Paragraph::new(line).block(Block::default().borders(Borders::ALL));
@@ -1349,7 +1498,9 @@ fn draw_step_panel(
     ui_language: UiLanguage,
 ) {
     match state.step {
+        StartWizardStep::Branch => draw_branch_panel(frame, area, state, ui_language),
         StartWizardStep::Model => draw_model_list(frame, area, state, ui_language),
+        StartWizardStep::Motion => draw_motion_list(frame, area, state, ui_language),
         StartWizardStep::Music => draw_music_list(frame, area, state, ui_language),
         StartWizardStep::Stage => draw_stage_list(frame, area, state, ui_language),
         StartWizardStep::Camera => draw_camera_panel(frame, area, state, ui_language),
@@ -1359,6 +1510,33 @@ fn draw_step_panel(
     }
 }
 
+fn draw_branch_panel(
+    frame: &mut Frame,
+    area: Rect,
+    state: &StartWizardState,
+    ui_language: UiLanguage,
+) {
+    let title = tr(ui_language, "0) 모델 종류 선택", "0) Select Source");
+    let items = vec![
+        ListItem::new(tr(ui_language, "GLB (.glb/.gltf)", "GLB (.glb/.gltf)")),
+        ListItem::new(tr(ui_language, "PMX + VMD", "PMX + VMD")),
+    ];
+    let mut list_state = ListState::default();
+    list_state.select(Some(match state.branch {
+        ModelBranch::Glb => 0,
+        ModelBranch::PmxVmd => 1,
+    }));
+    let list = List::new(items)
+        .block(Block::default().title(title).borders(Borders::ALL))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
+
 fn draw_model_list(
     frame: &mut Frame,
     area: Rect,
@@ -1366,13 +1544,44 @@ fn draw_model_list(
     ui_language: UiLanguage,
 ) {
     let title = tr(ui_language, "1) 모델 선택", "1) Select Model");
-    let items = state
-        .model_entries
+    let entries = match state.branch {
+        ModelBranch::Glb => &state.model_entries,
+        ModelBranch::PmxVmd => &state.pmx_entries,
+    };
+    let items = entries
         .iter()
         .map(|entry| ListItem::new(entry.label()))
         .collect::<Vec<_>>();
     let mut list_state = ListState::default();
     list_state.select(Some(state.model_index));
+    let list = List::new(items)
+        .block(Block::default().title(title).borders(Borders::ALL))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+    frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+fn draw_motion_list(
+    frame: &mut Frame,
+    area: Rect,
+    state: &StartWizardState,
+    ui_language: UiLanguage,
+) {
+    let title = tr(ui_language, "2) 모션 선택", "2) Select Motion");
+    let mut items = Vec::with_capacity(state.motion_entries.len() + 1);
+    items.push(ListItem::new(tr(ui_language, "없음", "None")));
+    items.extend(
+        state
+            .motion_entries
+            .iter()
+            .map(|entry| ListItem::new(entry.label())),
+    );
+    let mut list_state = ListState::default();
+    list_state.select(Some(state.motion_index));
     let list = List::new(items)
         .block(Block::default().title(title).borders(Borders::ALL))
         .highlight_style(
@@ -2183,6 +2392,8 @@ fn draw_summary_panel(
     frame: &mut Frame,
     area: Rect,
     model_dir: &Path,
+    pmx_dir: &Path,
+    motion_dir: &Path,
     music_dir: &Path,
     stage_dir: &Path,
     camera_dir: &Path,
@@ -2229,6 +2440,16 @@ fn draw_summary_panel(
             "{}: {}",
             tr(ui_language, "모델 경로", "Model Dir"),
             model_dir.display()
+        )),
+        Line::raw(format!(
+            "{}: {}",
+            tr(ui_language, "PMX 경로", "PMX Dir"),
+            pmx_dir.display()
+        )),
+        Line::raw(format!(
+            "{}: {}",
+            tr(ui_language, "모션 경로", "Motion Dir"),
+            motion_dir.display()
         )),
         Line::raw(format!(
             "{}: {}",
@@ -2386,10 +2607,20 @@ fn draw_help_panel(
 ) {
     let mut lines = Vec::new();
     lines.push(Line::raw(match state.step {
+        StartWizardStep::Branch => tr(
+            ui_language,
+            "브랜치: 좌/우 선택, Enter 다음, Esc 취소",
+            "Branch: left/right select, Enter next, Esc cancel",
+        ),
         StartWizardStep::Model => tr(
             ui_language,
             "모델: ↑/↓ 선택, Enter 다음, Esc 취소",
             "Model: ↑/↓ select, Enter next, Esc cancel",
+        ),
+        StartWizardStep::Motion => tr(
+            ui_language,
+            "모션: ↑/↓ 선택, Enter 다음, Esc 이전",
+            "Motion: ↑/↓ select, Enter next, Esc back",
         ),
         StartWizardStep::Music => tr(
             ui_language,
@@ -2581,6 +2812,12 @@ fn inspect_clip_duration(path: &Path, anim_selector: Option<&str>) -> Option<f32
     scene.animations.first().map(|clip| clip.duration)
 }
 
+fn inspect_motion_duration(path: &Path) -> Option<f32> {
+    crate::assets::vmd_motion::parse_vmd_motion(path)
+        .ok()
+        .map(|motion| motion.duration_secs())
+}
+
 fn inspect_audio_duration(path: &Path) -> Option<f32> {
     let file = File::open(path).ok()?;
     let decoder = Decoder::new(BufReader::new(file)).ok()?;
@@ -2653,6 +2890,8 @@ mod tests {
 
     fn test_state() -> StartWizardState {
         let model_entries = vec![StartEntry::from_path(Path::new("miku.glb"))];
+        let pmx_entries = vec![StartEntry::from_path(Path::new("miku.pmx"))];
+        let motion_entries = vec![StartEntry::from_path(Path::new("dance.vmd"))];
         let music_entries = vec![StartEntry::from_path(Path::new("world.mp3"))];
         let camera_entries = vec![StartEntry::from_path(Path::new("world_is_mine.vmd"))];
         let stage_entries = vec![StageChoice {
@@ -2664,6 +2903,8 @@ mod tests {
         }];
         StartWizardState::new(
             model_entries,
+            pmx_entries,
+            motion_entries,
             music_entries,
             stage_entries,
             camera_entries,
@@ -2676,6 +2917,12 @@ mod tests {
     #[test]
     fn transitions_model_to_confirm_with_enter() {
         let mut state = test_state();
+        assert_eq!(state.step, StartWizardStep::Branch);
+
+        assert!(matches!(
+            state.apply_event(key(KeyCode::Enter)),
+            StartWizardAction::Continue
+        ));
         assert_eq!(state.step, StartWizardStep::Model);
 
         assert!(matches!(
@@ -2724,17 +2971,51 @@ mod tests {
     fn esc_moves_back_or_cancels() {
         let mut state = test_state();
 
-        state.step = StartWizardStep::Music;
+        state.step = StartWizardStep::Branch;
+        state.branch = ModelBranch::PmxVmd;
+        assert!(matches!(
+            state.apply_event(key(KeyCode::Left)),
+            StartWizardAction::Continue
+        ));
+        assert_eq!(state.branch, ModelBranch::Glb);
+
+        state.step = StartWizardStep::Motion;
         assert!(matches!(
             state.apply_event(key(KeyCode::Esc)),
             StartWizardAction::Continue
         ));
         assert_eq!(state.step, StartWizardStep::Model);
 
+        state.step = StartWizardStep::Branch;
         assert!(matches!(
             state.apply_event(key(KeyCode::Esc)),
             StartWizardAction::Cancel
         ));
+    }
+
+    #[test]
+    fn pmx_branch_inserts_motion_step() {
+        let mut state = test_state();
+        state.branch = ModelBranch::PmxVmd;
+        state.step = StartWizardStep::Model;
+
+        assert!(matches!(
+            state.apply_event(key(KeyCode::Enter)),
+            StartWizardAction::Continue
+        ));
+        assert_eq!(state.step, StartWizardStep::Motion);
+    }
+
+    #[test]
+    fn motion_step_esc_returns_to_model() {
+        let mut state = test_state();
+        state.step = StartWizardStep::Motion;
+
+        assert!(matches!(
+            state.apply_event(key(KeyCode::Esc)),
+            StartWizardAction::Continue
+        ));
+        assert_eq!(state.step, StartWizardStep::Model);
     }
 
     #[test]
@@ -2789,6 +3070,8 @@ mod tests {
                     draw_start_wizard(
                         frame,
                         Path::new("assets/glb"),
+                        Path::new("assets/pmx"),
+                        Path::new("assets/vmd"),
                         Path::new("assets/music"),
                         Path::new("assets/stage"),
                         Path::new("assets/camera"),

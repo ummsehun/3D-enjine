@@ -15,6 +15,7 @@ pub enum ChannelTarget {
     Rotation,
     Scale,
     MorphWeights,
+    MaterialMorphWeights,
 }
 
 #[derive(Debug, Clone)]
@@ -46,7 +47,7 @@ pub struct AnimationClip {
 
 impl AnimationClip {
     pub fn sample_into(&self, time: f32, poses: &mut [NodePose]) {
-        self.sample_into_with_morph(time, poses, &mut []);
+        self.sample_into_with_morph(time, poses, &mut [], &mut []);
     }
 
     pub fn sample_into_with_morph(
@@ -54,6 +55,7 @@ impl AnimationClip {
         time: f32,
         poses: &mut [NodePose],
         morph_weights: &mut [Vec<f32>],
+        material_morph_weights: &mut [f32],
     ) {
         if self.channels.is_empty() || self.duration <= f32::EPSILON {
             return;
@@ -66,7 +68,7 @@ impl AnimationClip {
         };
 
         for channel in &self.channels {
-            if channel.inputs.is_empty() || channel.node_index >= poses.len() {
+            if channel.inputs.is_empty() {
                 continue;
             }
             let (i0, i1, t) = sample_segment(&channel.inputs, sampled_time);
@@ -77,6 +79,9 @@ impl AnimationClip {
             };
             match (&channel.target, &channel.outputs) {
                 (ChannelTarget::Translation, ChannelValues::Vec3(values)) => {
+                    if channel.node_index >= poses.len() {
+                        continue;
+                    }
                     let value = match channel.interpolation {
                         Interpolation::CubicSpline => interpolate_vec3_cubic(values, i0, i1, t, dt),
                         _ => {
@@ -88,6 +93,9 @@ impl AnimationClip {
                     poses[channel.node_index].translation = value;
                 }
                 (ChannelTarget::Scale, ChannelValues::Vec3(values)) => {
+                    if channel.node_index >= poses.len() {
+                        continue;
+                    }
                     let value = match channel.interpolation {
                         Interpolation::CubicSpline => interpolate_vec3_cubic(values, i0, i1, t, dt),
                         _ => {
@@ -99,6 +107,9 @@ impl AnimationClip {
                     poses[channel.node_index].scale = value;
                 }
                 (ChannelTarget::Rotation, ChannelValues::Quat(values)) => {
+                    if channel.node_index >= poses.len() {
+                        continue;
+                    }
                     let value = match channel.interpolation {
                         Interpolation::CubicSpline => interpolate_quat_cubic(values, i0, i1, t, dt),
                         _ => {
@@ -168,6 +179,38 @@ impl AnimationClip {
                                 };
                             }
                         }
+                    }
+                }
+                (
+                    ChannelTarget::MaterialMorphWeights,
+                    ChannelValues::MorphWeights {
+                        values,
+                        weights_per_key,
+                    },
+                ) => {
+                    if *weights_per_key == 0 || *weights_per_key > material_morph_weights.len() {
+                        continue;
+                    }
+                    let base0 = morph_base_index(*weights_per_key, i0, channel.interpolation);
+                    let base1 = morph_base_index(*weights_per_key, i1, channel.interpolation);
+                    if base0 + weights_per_key > values.len()
+                        || base1 + weights_per_key > values.len()
+                    {
+                        continue;
+                    }
+                    for (offset, slot) in material_morph_weights
+                        .iter_mut()
+                        .take(*weights_per_key)
+                        .enumerate()
+                    {
+                        let w0 = values[base0 + offset];
+                        let w1 = values[base1 + offset];
+                        *slot = match channel.interpolation {
+                            Interpolation::Step => w0,
+                            Interpolation::Linear | Interpolation::CubicSpline => {
+                                w0 + (w1 - w0) * t
+                            }
+                        };
                     }
                 }
                 _ => {}
@@ -487,7 +530,7 @@ mod tests {
             looping: true,
         };
 
-        clip.sample_into_with_morph(0.5, &mut poses, &mut morph_weights);
+        clip.sample_into_with_morph(0.5, &mut poses, &mut morph_weights, &mut []);
         assert!((morph_weights[0][0] - 0.5).abs() < 1e-5);
         assert!((morph_weights[0][1] - 0.25).abs() < 1e-5);
     }

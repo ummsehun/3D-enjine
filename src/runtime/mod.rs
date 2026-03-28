@@ -1,9 +1,17 @@
 pub mod app;
+pub mod asset_discovery;
+pub mod audio_sync;
 pub mod cli;
 pub mod config;
 pub mod graphics_proto;
+pub mod interaction;
+pub mod options;
+pub mod pmx_log;
 pub mod preprocess;
 pub mod preview;
+pub mod render_loop;
+pub mod scene_analysis;
 pub mod start_ui;
+pub mod state;
 pub mod sync_profile;
 pub mod terminal;

@@ -2048,6 +2048,7 @@ dependencies = [
  "bytemuck",
  "clap",
  "crossterm 0.29.0",
+ "encoding_rs",
  "futures",
  "glam",
  "gltf",

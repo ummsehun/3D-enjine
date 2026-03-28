@@ -1053,6 +1053,7 @@ mod tests {
     fn build_mixed_morph_scene() -> SceneCpu {
         let mut scene = cube_scene();
         scene.meshes[0].morph_targets = vec![MorphTargetCpu {
+            name: Some("stretch".to_owned()),
             position_deltas: scene.meshes[0]
                 .positions
                 .iter()

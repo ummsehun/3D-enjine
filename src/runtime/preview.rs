@@ -5,14 +5,14 @@ use std::{
     net::{TcpListener, TcpStream},
     path::PathBuf,
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
     thread,
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 use crate::runtime::cli::PreviewArgs;
 

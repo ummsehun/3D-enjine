@@ -2,6 +2,7 @@ pub mod backend;
 pub mod backend_cpu;
 pub mod background;
 pub mod frame;
+pub mod material_morph;
 pub mod renderer;
 
 #[cfg(feature = "gpu")]

@@ -370,6 +370,7 @@ fn sample_material(
     depth: f32,
     vertex_color: [f32; 4],
     config: &RenderConfig,
+    material_morph_weights: &[f32],
 ) -> MaterialSample {
     if !config.material_color {
         let mut material = resolve_material_props(scene, material_index);
@@ -377,6 +378,22 @@ fn sample_material(
         material.alpha = 1.0;
         return material;
     }
+    let base_material = if let Some(index) = material_index {
+        if let Some(mat) = scene.materials.get(index) {
+            Some(
+                crate::render::material_morph::apply_material_morph_to_index(
+                    mat,
+                    index,
+                    &scene.material_morphs,
+                    material_morph_weights,
+                ),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let mut out = resolve_material_props(scene, material_index);
     let mut color = [
         vertex_color[0],
@@ -384,7 +401,7 @@ fn sample_material(
         vertex_color[2],
         vertex_color[3],
     ];
-    if let Some(material) = material_index.and_then(|index| scene.materials.get(index)) {
+    if let Some(ref material) = base_material {
         color[0] *= material.base_color_factor[0];
         color[1] *= material.base_color_factor[1];
         color[2] *= material.base_color_factor[2];
@@ -865,6 +882,7 @@ pub fn render_frame(
     global_matrices: &[Mat4],
     skin_matrices: &[Vec<Mat4>],
     instance_morph_weights: &[Vec<f32>],
+    material_morph_weights: &[f32],
     glyph_ramp: &GlyphRamp,
     scratch: &mut RenderScratch,
     camera: Camera,
@@ -878,6 +896,7 @@ pub fn render_frame(
             global_matrices,
             skin_matrices,
             instance_morph_weights,
+            material_morph_weights,
             glyph_ramp,
             scratch,
             camera,
@@ -890,6 +909,7 @@ pub fn render_frame(
             global_matrices,
             skin_matrices,
             instance_morph_weights,
+            material_morph_weights,
             scratch,
             camera,
             model_rotation_y,
@@ -904,6 +924,7 @@ fn render_frame_ascii(
     global_matrices: &[Mat4],
     skin_matrices: &[Vec<Mat4>],
     instance_morph_weights: &[Vec<f32>],
+    material_morph_weights: &[f32],
     glyph_ramp: &GlyphRamp,
     scratch: &mut RenderScratch,
     camera: Camera,
@@ -989,6 +1010,7 @@ fn render_frame_ascii(
                 charset,
                 config,
                 scene,
+                material_morph_weights,
                 &mut stats,
                 shading,
                 contrast,
@@ -1027,6 +1049,7 @@ fn render_frame_braille(
     global_matrices: &[Mat4],
     skin_matrices: &[Vec<Mat4>],
     instance_morph_weights: &[Vec<f32>],
+    material_morph_weights: &[f32],
     scratch: &mut RenderScratch,
     camera: Camera,
     model_rotation_y: f32,
@@ -1124,6 +1147,7 @@ fn render_frame_braille(
                 subpixels,
                 config,
                 scene,
+                material_morph_weights,
                 &mut stats,
                 shading,
                 contrast,
@@ -1326,6 +1350,7 @@ fn rasterize_mesh(
     charset: &[char],
     config: &RenderConfig,
     scene: &SceneCpu,
+    material_morph_weights: &[f32],
     stats: &mut RenderStats,
     shading: ShadingParams,
     contrast: ContrastParams,
@@ -1530,6 +1555,7 @@ fn rasterize_mesh(
                         depth,
                         vertex_color,
                         config,
+                        material_morph_weights,
                     );
                     if matches!(pass, RasterPass::Mask) && sample.alpha < sample.alpha_cutoff {
                         edge0 += edge0_a;
@@ -1630,6 +1656,7 @@ fn rasterize_braille_mesh(
     subpixels: &mut BrailleSubpixelBuffers,
     config: &RenderConfig,
     scene: &SceneCpu,
+    material_morph_weights: &[f32],
     stats: &mut RenderStats,
     shading: ShadingParams,
     contrast: ContrastParams,
@@ -1838,6 +1865,7 @@ fn rasterize_braille_mesh(
                         depth,
                         vertex_color,
                         config,
+                        material_morph_weights,
                     );
                     if matches!(pass, RasterPass::Mask) && sample.alpha < sample.alpha_cutoff {
                         edge0 += edge0_a;
@@ -2566,6 +2594,7 @@ mod tests {
             0.2,
             [1.0, 1.0, 1.0, 1.0],
             &cfg,
+            &[],
         );
         let sampled_srgb = sample_material(
             &srgb_scene,
@@ -2575,6 +2604,7 @@ mod tests {
             0.2,
             [1.0, 1.0, 1.0, 1.0],
             &cfg,
+            &[],
         );
 
         assert!(sampled_srgb.albedo_linear[0] < sampled_linear.albedo_linear[0]);
@@ -2594,6 +2624,7 @@ mod tests {
             0.2,
             [1.0, 1.0, 1.5, 2.0],
             &cfg,
+            &[],
         );
         assert!((0.0..=1.0).contains(&sampled.alpha));
         assert!((sampled.alpha - 1.0).abs() < 1e-6);

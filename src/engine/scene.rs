@@ -424,6 +424,7 @@ pub fn resolve_cell_aspect(config: &RenderConfig, detected: Option<f32>) -> f32 
 
 #[derive(Debug, Clone)]
 pub struct MorphTargetCpu {
+    pub name: Option<String>,
     pub position_deltas: Vec<Vec3>,
     pub normal_deltas: Vec<Vec3>,
 }
@@ -471,6 +472,33 @@ pub struct UvTransform2D {
     pub scale: [f32; 2],
     pub rotation_rad: f32,
     pub tex_coord_override: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterialMorphFormula {
+    Multiply = 0,
+    Add = 1,
+}
+
+#[derive(Debug, Clone)]
+pub struct MaterialMorphOp {
+    pub target_material_index: i32,
+    pub formula: MaterialMorphFormula,
+    pub diffuse: [f32; 4],
+    pub specular: [f32; 3],
+    pub specular_factor: f32,
+    pub ambient: [f32; 3],
+    pub edge_color: [f32; 4],
+    pub edge_size: f32,
+    pub texture_factor: [f32; 4],
+    pub sphere_texture_factor: [f32; 4],
+    pub toon_texture_factor: [f32; 4],
+}
+
+#[derive(Debug, Clone)]
+pub struct MaterialMorphCpu {
+    pub name: String,
+    pub operations: Vec<MaterialMorphOp>,
 }
 
 #[derive(Debug, Clone)]
@@ -564,6 +592,8 @@ pub struct SceneCpu {
     pub mesh_instances: Vec<MeshInstance>,
     pub animations: Vec<AnimationClip>,
     pub root_center_node: Option<usize>,
+    pub pmx_rig_meta: Option<crate::engine::pmx_rig::PmxRigMeta>,
+    pub material_morphs: Vec<MaterialMorphCpu>,
 }
 
 impl SceneCpu {
@@ -696,6 +726,8 @@ pub fn cube_scene() -> SceneCpu {
         }],
         animations: Vec::new(),
         root_center_node: Some(0),
+        pmx_rig_meta: None,
+        material_morphs: Vec::new(),
     }
 }
 

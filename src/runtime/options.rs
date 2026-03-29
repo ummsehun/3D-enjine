@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use glam::Vec3;
+
 pub(crate) use crate::runtime::options_visual::{
     resolve_visual_options_for_bench, resolve_visual_options_for_run,
     resolve_visual_options_for_start,
@@ -9,9 +11,10 @@ use crate::{
     cli::{RunArgs, RunSceneArg, StartArgs},
     runtime::{
         config::GasciiConfig,
+        state::RuntimePmxSettings,
         sync_profile::{
-            build_profile_key, default_profile_store_path, SyncProfileEntry, SyncProfileMode,
-            SyncProfileStore,
+            SyncProfileEntry, SyncProfileMode, SyncProfileStore, build_profile_key,
+            default_profile_store_path,
         },
     },
     scene::{
@@ -107,6 +110,13 @@ pub(crate) struct RuntimeSyncProfileContext {
     pub(crate) store_path: PathBuf,
     pub(crate) key: String,
     pub(crate) hit: bool,
+}
+
+fn resolve_pmx_gravity(cli_value: Option<&[f32]>, runtime_cfg: &GasciiConfig) -> Vec3 {
+    match cli_value {
+        Some([x, y, z]) => Vec3::new(*x, *y, *z),
+        _ => runtime_cfg.pmx_gravity,
+    }
 }
 
 fn resolve_sync_options_common(
@@ -253,6 +263,48 @@ pub(crate) fn resolve_sync_profile_for_assets(
         }),
         profile,
     )
+}
+
+pub(crate) fn resolve_pmx_settings_for_start(
+    args: &StartArgs,
+    runtime_cfg: &GasciiConfig,
+) -> RuntimePmxSettings {
+    RuntimePmxSettings {
+        gravity: resolve_pmx_gravity(args.pmx_gravity.as_deref(), runtime_cfg),
+        warmup_steps: args
+            .pmx_warmup_steps
+            .unwrap_or(runtime_cfg.pmx_warmup_steps)
+            .min(240),
+        unit_step: args
+            .pmx_unit_step
+            .unwrap_or(runtime_cfg.pmx_unit_step)
+            .clamp(0.001, 0.05),
+        max_substeps: args
+            .pmx_max_substeps
+            .unwrap_or(runtime_cfg.pmx_max_substeps)
+            .clamp(1, 16),
+    }
+}
+
+pub(crate) fn resolve_pmx_settings_for_run(
+    args: &RunArgs,
+    runtime_cfg: &GasciiConfig,
+) -> RuntimePmxSettings {
+    RuntimePmxSettings {
+        gravity: resolve_pmx_gravity(args.pmx_gravity.as_deref(), runtime_cfg),
+        warmup_steps: args
+            .pmx_warmup_steps
+            .unwrap_or(runtime_cfg.pmx_warmup_steps)
+            .min(240),
+        unit_step: args
+            .pmx_unit_step
+            .unwrap_or(runtime_cfg.pmx_unit_step)
+            .clamp(0.001, 0.05),
+        max_substeps: args
+            .pmx_max_substeps
+            .unwrap_or(runtime_cfg.pmx_max_substeps)
+            .clamp(1, 16),
+    }
 }
 
 pub(crate) fn default_color_mode_for_mode(mode: RenderMode) -> ColorMode {

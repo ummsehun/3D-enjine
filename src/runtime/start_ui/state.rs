@@ -1,17 +1,17 @@
 use std::{collections::HashMap, fs, path::Path, path::PathBuf};
 
 use crate::scene::{
-    resolve_cell_aspect, AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset,
-    CameraControlMode, CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode,
-    CinematicCameraMode, ClarityProfile, ColorMode, ContrastProfile, DetailProfile,
-    GraphicsProtocol, PerfProfile, RenderBackend, RenderConfig, RenderMode, RenderOutputMode,
-    SyncPolicy, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
+    AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
+    CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
+    ClarityProfile, ColorMode, ContrastProfile, DetailProfile, GraphicsProtocol, PerfProfile,
+    RenderBackend, RenderConfig, RenderMode, RenderOutputMode, SyncPolicy, SyncSpeedMode,
+    TextureSamplingMode, ThemeStyle, resolve_cell_aspect,
 };
 
 use crate::runtime::start_ui_helpers::{
-    breakpoint_for, closest_u32_index, compute_duration_fit_factor, detect_terminal_cell_aspect,
-    format_mib, inspect_audio_duration, inspect_clip_duration, inspect_motion_duration, MIN_HEIGHT,
-    MIN_WIDTH, START_FPS_OPTIONS, SYNC_OFFSET_LIMIT_MS,
+    MIN_HEIGHT, MIN_WIDTH, START_FPS_OPTIONS, SYNC_OFFSET_LIMIT_MS, breakpoint_for,
+    closest_u32_index, compute_duration_fit_factor, detect_terminal_cell_aspect, format_mib,
+    inspect_audio_duration, inspect_clip_duration, inspect_motion_duration,
 };
 
 use super::types::{

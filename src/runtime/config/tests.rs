@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use glam::Vec3;
+
 use crate::runtime::config::load_gascii_config;
 use crate::runtime::config::types::{GasciiConfig, UiLanguage};
 use crate::runtime::config_parse::parse_bool;
@@ -83,6 +85,10 @@ fn default_config_values() {
         std::path::PathBuf::from("assets/sync")
     );
     assert_eq!(cfg.sync_profile_mode, SyncProfileMode::Auto);
+    assert_eq!(cfg.pmx_gravity, Vec3::new(0.0, -9.8, 0.0));
+    assert_eq!(cfg.pmx_warmup_steps, 24);
+    assert!((cfg.pmx_unit_step - 0.008).abs() < 1e-6);
+    assert_eq!(cfg.pmx_max_substeps, 8);
     assert_eq!(cfg.upscale_factor, 2);
     assert!((cfg.upscale_sharpen - 0.20).abs() < 1e-6);
     assert_eq!(cfg.triangle_stride, 1);
@@ -137,6 +143,7 @@ fn parse_new_visual_and_sync_keys() {
         "cell_aspect_mode = manual\ncell_aspect_trim = 1.15\ncontrast_profile = fixed\n\
          sync_offset_ms = -120\nsync_speed_mode = realtime\nsync_policy = fixed\n\
          sync_hard_snap_ms = 160\nsync_kp = 0.2\nsync_profile_dir = assets/sync/custom\n\
+         pmx_gravity = 0.0,-12.5,0.5\npmx_warmup_steps = 40\npmx_unit_step = 0.012\npmx_max_substeps = 10\n\
          sync_profile_mode = write\ncolor_mode=ansi\nascii_force_color=false\n\
          output_mode=kitty-hq\nkitty_transport=direct\nkitty_compression=zlib\n\
          kitty_internal_res=1280x720\nkitty_scale=1.25\nhq_target_fps=30\n\
@@ -226,4 +233,8 @@ fn parse_new_visual_and_sync_keys() {
         std::path::PathBuf::from("assets/sync/custom")
     );
     assert_eq!(cfg.sync_profile_mode, SyncProfileMode::Write);
+    assert_eq!(cfg.pmx_gravity, Vec3::new(0.0, -12.5, 0.5));
+    assert_eq!(cfg.pmx_warmup_steps, 40);
+    assert!((cfg.pmx_unit_step - 0.012).abs() < 1e-6);
+    assert_eq!(cfg.pmx_max_substeps, 10);
 }

@@ -15,17 +15,18 @@ use crate::{
         audio_sync::{AudioSyncRuntime, LoadedCameraTrack},
         graphics_proto::detect_supported_protocol,
         interaction::{freefly_state_from_camera, max_scene_vertices, orbit_camera},
-        options::{resolve_effective_color_mode, RuntimeSyncProfileContext},
+        options::{RuntimeSyncProfileContext, resolve_effective_color_mode},
         scene_analysis::compute_scene_framing,
         state::{
-            cap_render_size, normalize_graphics_settings, resolve_runtime_backend,
-            ColorRecoveryState, ContinuousSyncState, ExposureAutoBoost, RuntimeAdaptiveQuality,
-            RuntimeCameraSettings, RuntimeCameraState, RuntimeContrastPreset, ScreenFitController,
-            HYBRID_GRAPHICS_MAX_CELLS, SYNC_OFFSET_LIMIT_MS,
+            ColorRecoveryState, ContinuousSyncState, ExposureAutoBoost, HYBRID_GRAPHICS_MAX_CELLS,
+            RuntimeAdaptiveQuality, RuntimeCameraSettings, RuntimeCameraState,
+            RuntimePmxSettings,
+            RuntimeContrastPreset, SYNC_OFFSET_LIMIT_MS, ScreenFitController, cap_render_size,
+            normalize_graphics_settings, resolve_runtime_backend,
         },
     },
     scene::{
-        resolve_cell_aspect, CameraControlMode, RenderConfig, RenderOutputMode, SceneCpu, StageRole,
+        CameraControlMode, RenderConfig, RenderOutputMode, SceneCpu, StageRole, resolve_cell_aspect,
     },
     terminal::{PresentMode, TerminalProfile, TerminalSession},
 };
@@ -100,6 +101,7 @@ pub(super) struct BootstrapState {
     pub(super) sim_time: f32,
     pub(super) sim_accum: f32,
     pub(super) prev_wall_seconds: f32,
+    pub(super) prev_animation_time: Option<f32>,
     pub(super) start: Instant,
     pub(super) terminal_profile: TerminalProfile,
     pub(super) sync_profile: Option<RuntimeSyncProfileContext>,
@@ -133,6 +135,7 @@ pub(super) fn bootstrap_runtime(
     wasd_mode: CameraControlMode,
     freefly_speed: f32,
     camera_settings: RuntimeCameraSettings,
+    pmx_settings: RuntimePmxSettings,
     sync_profile: Option<RuntimeSyncProfileContext>,
 ) -> Result<BootstrapState> {
     config.backend = resolve_runtime_backend(config.backend);
@@ -152,7 +155,11 @@ pub(super) fn bootstrap_runtime(
         );
     }
     let pipeline = FramePipeline::new(&scene);
-    let pmx_physics_state = crate::runtime::state::PmxPhysicsState::from_scene(&scene);
+    let mut pmx_physics_state =
+        crate::runtime::state::PmxPhysicsState::from_scene(&scene, pmx_settings);
+    if let Some(physics_state) = pmx_physics_state.as_mut() {
+        physics_state.warmup(&scene);
+    }
     let glyph_ramp = GlyphRamp::from_config(&config);
     let render_scratch = RenderScratch::with_capacity(max_scene_vertices(&scene));
     let framing = compute_scene_framing(
@@ -415,6 +422,7 @@ pub(super) fn bootstrap_runtime(
         sim_time,
         sim_accum,
         prev_wall_seconds,
+        prev_animation_time: None,
         start,
         terminal_profile,
         sync_profile,

@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::{
     assets::vmd_motion::parse_vmd_motion,
@@ -14,14 +14,15 @@ use crate::{
         audio_sync::prepare_audio_sync,
         config::GasciiConfig,
         options::{
-            default_color_mode_for_mode, resolve_effective_camera_mode,
-            resolve_effective_color_mode, resolve_sync_options_for_start,
+            ResolvedSyncOptions, ResolvedVisualOptions, default_color_mode_for_mode,
+            resolve_effective_camera_mode, resolve_effective_color_mode,
+            resolve_pmx_settings_for_start, resolve_sync_options_for_start,
             resolve_sync_profile_for_assets, resolve_sync_profile_options_for_start,
-            resolve_visual_options_for_start, ResolvedSyncOptions, ResolvedVisualOptions,
+            resolve_visual_options_for_start,
         },
         pmx_log,
         render_loop::run_scene_interactive,
-        start_ui::{run_start_wizard, StageStatus, StartWizardDefaults},
+        start_ui::{StageStatus, StartWizardDefaults, run_start_wizard},
         state::RuntimeCameraSettings,
     },
     scene::RenderMode,
@@ -36,6 +37,7 @@ pub(super) fn start(args: StartArgs) -> Result<()> {
     let visual = resolve_visual_options_for_start(&args, &runtime_cfg);
     let sync_defaults = resolve_sync_options_for_start(&args, &runtime_cfg);
     let sync_profile_defaults = resolve_sync_profile_options_for_start(&args, &runtime_cfg);
+    let pmx_settings = resolve_pmx_settings_for_start(&args, &runtime_cfg);
     let model_files = discover_glb_files(&args.dir)?;
     let pmx_files = discover_pmx_files(&args.pmx_dir)?;
     let motion_files = discover_vmd_files(&args.motion_dir);
@@ -146,7 +148,7 @@ pub(super) fn start(args: StartArgs) -> Result<()> {
                 .pmx_path
                 .as_deref()
                 .context("PMX branch selected without pmx_path")?;
-            pmx_log::info("=== PMX+VMD import start ===");
+            pmx_log::start_session("=== PMX+VMD import session start ===");
             pmx_log::info(format!("PMX path: {}", pmx_path.display()));
             if let Some(motion_vmd_path) = selection.motion_vmd_path.as_deref() {
                 pmx_log::info(format!("VMD path: {}", motion_vmd_path.display()));
@@ -161,17 +163,62 @@ pub(super) fn start(args: StartArgs) -> Result<()> {
                     return Err(err);
                 }
             };
-            pmx_log::info(format!(
-                "PMX loaded: nodes={}, meshes={}, materials={}, material_morphs={}, ik_chains={}",
-                scene.nodes.len(),
-                scene.meshes.len(),
-                scene.materials.len(),
-                scene.material_morphs.len(),
+            let morph_target_count = scene
+                .meshes
+                .iter()
+                .map(|mesh| mesh.morph_targets.len())
+                .sum::<usize>();
+            let (bone_count, bone_ik_count, bone_append_count, bone_fixed_axis_count, bone_local_axis_count, bone_external_parent_count) =
                 scene
                     .pmx_rig_meta
                     .as_ref()
-                    .map(|meta| meta.ik_chains.len())
-                    .unwrap_or(0)
+                    .map(|meta| {
+                        (
+                            meta.bones.len(),
+                            meta.count_bones_with_ik(),
+                            meta.count_bones_with_append(),
+                            meta.count_bones_with_fixed_axis(),
+                            meta.count_bones_with_local_axis(),
+                            meta.count_bones_with_external_parent(),
+                        )
+                    })
+                    .unwrap_or((0, 0, 0, 0, 0, 0));
+            let ik_chain_count = scene
+                .pmx_rig_meta
+                .as_ref()
+                .map(|meta| meta.ik_chains.len())
+                .unwrap_or(0);
+            let rigid_body_count = scene
+                .pmx_physics_meta
+                .as_ref()
+                .map(|meta| meta.rigid_bodies.len())
+                .unwrap_or(0);
+            let joint_count = scene
+                .pmx_physics_meta
+                .as_ref()
+                .map(|meta| meta.joints.len())
+                .unwrap_or(0);
+            pmx_log::info(format!(
+                "PMX loaded: nodes={}, skins={}, meshes={}, vertices={}, triangles={}, morph_targets={}, material_morphs={}, ik_chains={}, rigid_bodies={}, joints={}",
+                scene.nodes.len(),
+                scene.skins.len(),
+                scene.meshes.len(),
+                scene.total_vertices(),
+                scene.total_triangles(),
+                morph_target_count,
+                scene.material_morphs.len(),
+                ik_chain_count,
+                rigid_body_count,
+                joint_count
+            ));
+            pmx_log::info(format!(
+                "PMX rig bones: total={}, ik={}, append={}, fixed_axis={}, local_axis={}, external_parent={}",
+                bone_count,
+                bone_ik_count,
+                bone_append_count,
+                bone_fixed_axis_count,
+                bone_local_axis_count,
+                bone_external_parent_count
             ));
             if let Some(motion_vmd_path) = selection.motion_vmd_path.as_deref() {
                 match parse_vmd_motion(motion_vmd_path) {
@@ -447,6 +494,7 @@ pub(super) fn start(args: StartArgs) -> Result<()> {
         wasd_mode,
         freefly_speed,
         camera_settings,
+        pmx_settings,
         sync_profile_context,
     )
 }

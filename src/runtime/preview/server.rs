@@ -5,17 +5,17 @@ use std::{
     net::{TcpListener, TcpStream},
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::web_assets::{
-    load_preview_file, EMBED_APP_JS, EMBED_INDEX_HTML, EMBED_MMD_PROBE_HTML, EMBED_MMD_PROBE_JS,
+    EMBED_APP_JS, EMBED_INDEX_HTML, EMBED_MMD_PROBE_HTML, EMBED_MMD_PROBE_JS, load_preview_file,
 };
 use crate::runtime::cli::PreviewArgs;
 

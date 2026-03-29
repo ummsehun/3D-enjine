@@ -98,18 +98,20 @@ fn build_vertices(mesh: &MeshCpu, morph_weights: Option<&[f32]>) -> Vec<super::p
                 .as_ref()
                 .and_then(|values| values.get(i).copied())
                 .unwrap_or([0.0, 0.0, 0.0, 0.0]);
-            let (morphed_pos, morphed_normal) = apply_morph_targets(
+            let (morphed_pos, morphed_normal, morphed_uv0, morphed_uv1) = apply_morph_targets(
                 mesh.morph_targets.as_slice(),
                 i,
                 *pos,
                 normal,
+                uv,
+                uv1,
                 morph_weights,
             );
             super::pipeline::Vertex {
                 position: [morphed_pos.x, morphed_pos.y, morphed_pos.z],
                 normal: [morphed_normal.x, morphed_normal.y, morphed_normal.z],
-                uv0: [uv.x, uv.y],
-                uv1: [uv1.x, uv1.y],
+                uv0: [morphed_uv0.x, morphed_uv0.y],
+                uv1: [morphed_uv1.x, morphed_uv1.y],
                 joint_indices,
                 joint_weights,
             }
@@ -122,17 +124,21 @@ fn apply_morph_targets(
     vertex_index: usize,
     base_position: Vec3,
     base_normal: Vec3,
+    base_uv0: Vec2,
+    base_uv1: Vec2,
     weights: Option<&[f32]>,
-) -> (Vec3, Vec3) {
+) -> (Vec3, Vec3, Vec2, Vec2) {
     let Some(weights) = weights else {
-        return (base_position, base_normal);
+        return (base_position, base_normal, base_uv0, base_uv1);
     };
     if morph_targets.is_empty() || weights.is_empty() {
-        return (base_position, base_normal);
+        return (base_position, base_normal, base_uv0, base_uv1);
     }
 
     let mut out_position = base_position;
     let mut out_normal = base_normal;
+    let mut out_uv0 = base_uv0;
+    let mut out_uv1 = base_uv1;
     for (target_index, target) in morph_targets.iter().enumerate() {
         let weight = weights.get(target_index).copied().unwrap_or(0.0);
         if weight.abs() <= 1e-5 {
@@ -144,8 +150,18 @@ fn apply_morph_targets(
         if let Some(delta) = target.normal_deltas.get(vertex_index) {
             out_normal += *delta * weight;
         }
+        if let Some(deltas) = target.uv0_deltas.as_ref() {
+            if let Some(delta) = deltas.get(vertex_index) {
+                out_uv0 += *delta * weight;
+            }
+        }
+        if let Some(deltas) = target.uv1_deltas.as_ref() {
+            if let Some(delta) = deltas.get(vertex_index) {
+                out_uv1 += *delta * weight;
+            }
+        }
     }
-    (out_position, out_normal.normalize_or_zero())
+    (out_position, out_normal.normalize_or_zero(), out_uv0, out_uv1)
 }
 
 pub struct GpuTexture {

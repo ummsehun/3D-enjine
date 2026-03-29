@@ -1,6 +1,9 @@
 use glam::Mat4;
 
-use crate::engine::pmx_rig::{compute_bone_position, solve_ik_chain_ccd};
+use crate::engine::pmx_rig::{
+    apply_append_bone_transforms, apply_pmx_bone_axis_constraints, compute_bone_position,
+    solve_ik_chain_ccd,
+};
 use crate::runtime::state::PmxPhysicsState;
 use crate::{animation::ChannelTarget, scene::NodePose};
 use crate::{
@@ -75,13 +78,15 @@ impl FramePipeline {
             );
         }
 
-        // PMX IK solve: adjust joint rotations after animation sampling
         if let Some(rig_meta) = &scene.pmx_rig_meta {
-            for chain in &rig_meta.ik_chains {
-                let target_pos =
-                    compute_bone_position(chain.controller_bone_index, &scene.nodes, &self.poses);
-                solve_ik_chain_ccd(chain, &scene.nodes, &mut self.poses, target_pos);
-            }
+            apply_append_bone_transforms(rig_meta, &mut self.poses);
+        }
+
+        // PMX IK solve: adjust joint rotations after animation sampling
+        solve_pmx_ik_chains(scene, &mut self.poses);
+
+        if let Some(rig_meta) = &scene.pmx_rig_meta {
+            apply_pmx_bone_axis_constraints(rig_meta, &mut self.poses);
         }
 
         compute_global_matrices_in_place(
@@ -92,6 +97,10 @@ impl FramePipeline {
         );
         if let Some(physics) = physics_state.as_deref_mut() {
             physics.step(scene, &mut self.poses, &self.globals, physics_dt);
+            solve_pmx_ik_chains(scene, &mut self.poses);
+            if let Some(rig_meta) = &scene.pmx_rig_meta {
+                apply_pmx_bone_axis_constraints(rig_meta, &mut self.poses);
+            }
             compute_global_matrices_in_place(
                 &scene.nodes,
                 &self.poses,
@@ -143,6 +152,17 @@ fn normalized_clip_time(elapsed_seconds: f32, duration: f32) -> f32 {
     elapsed_seconds.rem_euclid(duration) / duration
 }
 
+fn solve_pmx_ik_chains(scene: &SceneCpu, poses: &mut [NodePose]) {
+    let Some(rig_meta) = &scene.pmx_rig_meta else {
+        return;
+    };
+
+    for chain in &rig_meta.ik_chains {
+        let target_pos = compute_bone_position(chain.controller_bone_index, &scene.nodes, poses);
+        solve_ik_chain_ccd(chain, &scene.nodes, poses, target_pos);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +200,7 @@ mod tests {
     fn prepare_frame_applies_secondary_morph_clip_with_primary_timeline() {
         let node = Node {
             name: Some("root".to_owned()),
+            name_en: None,
             parent: None,
             children: Vec::new(),
             base_translation: Vec3::ZERO,
@@ -201,6 +222,8 @@ mod tests {
                 name: Some("smile".to_owned()),
                 position_deltas: vec![Vec3::new(0.0, 1.0, 0.0)],
                 normal_deltas: vec![Vec3::ZERO],
+                uv0_deltas: None,
+                uv1_deltas: None,
             }],
         };
         let primary = AnimationClip {
@@ -265,6 +288,7 @@ mod tests {
             skins: Vec::new(),
             nodes: vec![Node {
                 name: Some("root".to_owned()),
+                name_en: None,
                 parent: None,
                 children: Vec::new(),
                 base_translation: Vec3::ZERO,
@@ -299,7 +323,9 @@ mod tests {
         };
 
         let mut pipeline = FramePipeline::new(&scene);
-        let mut physics = PmxPhysicsState::from_scene(&scene).expect("physics state");
+        let mut physics =
+            PmxPhysicsState::from_scene(&scene, crate::runtime::state::RuntimePmxSettings::default())
+                .expect("physics state");
         pipeline.prepare_frame(&scene, 0.0, None, Some(&mut physics), 0.2);
 
         let root_y = pipeline.globals()[0].transform_point3(Vec3::ZERO).y;
@@ -316,6 +342,7 @@ mod tests {
             nodes: vec![
                 Node {
                     name: Some("controller".to_owned()),
+                    name_en: None,
                     parent: None,
                     children: Vec::new(),
                     base_translation: Vec3::new(0.0, 1.0, 0.0),
@@ -324,6 +351,7 @@ mod tests {
                 },
                 Node {
                     name: Some("joint".to_owned()),
+                    name_en: None,
                     parent: None,
                     children: vec![2],
                     base_translation: Vec3::ZERO,
@@ -332,6 +360,7 @@ mod tests {
                 },
                 Node {
                     name: Some("effector".to_owned()),
+                    name_en: None,
                     parent: Some(1),
                     children: Vec::new(),
                     base_translation: Vec3::new(1.0, 0.0, 0.0),
@@ -343,6 +372,7 @@ mod tests {
             animations: Vec::new(),
             root_center_node: Some(0),
             pmx_rig_meta: Some(crate::engine::pmx_rig::PmxRigMeta {
+                bones: Vec::new(),
                 ik_chains: vec![crate::engine::pmx_rig::IKChain {
                     controller_bone_index: 0,
                     target_bone_index: 2,

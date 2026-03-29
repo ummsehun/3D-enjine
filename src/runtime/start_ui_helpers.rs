@@ -7,7 +7,7 @@ use rodio::{Decoder, Source};
 use crate::{
     loader,
     runtime::config::UiLanguage,
-    scene::{estimate_cell_aspect_from_window, PerfProfile, SyncSpeedMode},
+    scene::{PerfProfile, SyncSpeedMode, estimate_cell_aspect_from_window},
 };
 
 use super::start_ui::UiBreakpoint;

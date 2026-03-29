@@ -1,6 +1,6 @@
 use std::io::{self, IsTerminal};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalProfile {

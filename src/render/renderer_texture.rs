@@ -186,11 +186,7 @@ pub(super) fn wrap_uv(value: f32, mode: TextureWrapMode) -> f32 {
         TextureWrapMode::MirroredRepeat => {
             let whole = value.floor() as i32;
             let frac = value - value.floor();
-            if whole & 1 == 0 {
-                frac
-            } else {
-                1.0 - frac
-            }
+            if whole & 1 == 0 { frac } else { 1.0 - frac }
         }
         TextureWrapMode::ClampToEdge => value.clamp(0.0, 1.0 - 1.0e-6),
     }

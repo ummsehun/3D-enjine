@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use glam::Vec3;
+
 use crate::scene::{
     AnsiQuantization, BrailleProfile, CameraAlignPreset, CameraControlMode, CameraMode,
     CinematicCameraMode, ColorMode, ContrastProfile, KittyCompression, KittyTransport,
@@ -10,11 +12,13 @@ mod pmx_physics;
 mod quality;
 mod quality_tuning;
 
-pub(crate) use pmx_physics::PmxPhysicsState;
+pub(crate) use pmx_physics::{
+    PmxPhysicsState, derive_pmx_profile,
+};
 pub(crate) use quality::{
-    apply_runtime_contrast_preset, dynamic_clip_planes, AutoRadiusGuard, CenterLockState,
-    DistanceClampGuard, ExposureAutoBoost, RuntimeAdaptiveQuality, ScreenFitController,
-    VisibilityWatchdog,
+    AutoRadiusGuard, CenterLockState, DistanceClampGuard, ExposureAutoBoost,
+    RuntimeAdaptiveQuality, ScreenFitController, VisibilityWatchdog, apply_runtime_contrast_preset,
+    dynamic_clip_planes,
 };
 pub(crate) use quality_tuning::{
     apply_adaptive_quality_tuning, apply_distant_subject_clarity_boost,
@@ -90,6 +94,25 @@ pub(crate) struct RuntimeCameraSettings {
     pub(crate) vmd_fps: f32,
     pub(crate) vmd_path: Option<PathBuf>,
     pub(crate) look_speed: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RuntimePmxSettings {
+    pub(crate) gravity: Vec3,
+    pub(crate) warmup_steps: u32,
+    pub(crate) unit_step: f32,
+    pub(crate) max_substeps: usize,
+}
+
+impl Default for RuntimePmxSettings {
+    fn default() -> Self {
+        Self {
+            gravity: Vec3::new(0.0, -9.8, 0.0),
+            warmup_steps: 24,
+            unit_step: 0.008,
+            max_substeps: 8,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]

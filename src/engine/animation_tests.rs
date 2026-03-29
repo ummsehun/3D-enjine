@@ -5,6 +5,7 @@ use crate::scene::Node;
 fn animation_linear_loop_sampling() {
     let nodes = vec![Node {
         name: None,
+        name_en: None,
         parent: None,
         children: Vec::new(),
         base_translation: Vec3::ZERO,
@@ -33,6 +34,7 @@ fn global_matrix_parent_chain() {
     let nodes = vec![
         Node {
             name: None,
+            name_en: None,
             parent: None,
             children: vec![1],
             base_translation: Vec3::new(1.0, 0.0, 0.0),
@@ -41,6 +43,7 @@ fn global_matrix_parent_chain() {
         },
         Node {
             name: None,
+            name_en: None,
             parent: Some(0),
             children: Vec::new(),
             base_translation: Vec3::new(0.0, 2.0, 0.0),
@@ -59,6 +62,7 @@ fn global_matrix_parent_chain() {
 fn morph_weights_linear_sampling() {
     let nodes = vec![Node {
         name: Some("morph".to_owned()),
+        name_en: None,
         parent: None,
         children: Vec::new(),
         base_translation: Vec3::ZERO,

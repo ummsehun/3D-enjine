@@ -8,6 +8,6 @@ mod texture;
 
 pub use device::{AdapterInfo, GpuContext, GpuError};
 pub use pipeline::{GpuPipeline, Uniforms, Vertex};
-pub use renderer::{render_frame_gpu, GpuRenderer};
+pub use renderer::{GpuRenderer, render_frame_gpu};
 pub use resources::{GpuMesh, GpuTexture};
 pub use texture::{GpuTexture as RenderTarget, TextureSize};

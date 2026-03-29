@@ -6,15 +6,15 @@ use crossterm::{
     execute, queue,
     style::Print,
     terminal::{
-        disable_raw_mode, enable_raw_mode, size, BeginSynchronizedUpdate, Clear, ClearType,
-        EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
+        BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate, EnterAlternateScreen,
+        LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
     },
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
     renderer::FrameBuffers,
-    runtime::graphics_proto::{write_graphics_frame, GraphicsPresentOptions},
+    runtime::graphics_proto::{GraphicsPresentOptions, write_graphics_frame},
     runtime::terminal_caps::ensure_tty,
     runtime::terminal_diff::{build_diff_segments, quantize_rgb},
     scene::{

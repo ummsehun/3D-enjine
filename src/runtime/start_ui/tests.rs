@@ -1,7 +1,7 @@
 use super::*;
 use crate::runtime::start_ui_helpers::breakpoint_for;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{Terminal, backend::TestBackend};
 
 fn key(code: KeyCode) -> StartWizardEvent {
     StartWizardEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -103,6 +103,31 @@ fn pmx_flow_transitions_model_to_motion_then_music() {
         StartWizardAction::Continue
     ));
     assert_eq!(state.step, StartWizardStep::Music);
+}
+
+#[test]
+fn pmx_flow_tab_keeps_motion_in_path() {
+    let mut state = test_state();
+    state.branch = ModelBranch::PmxVmd;
+    state.step = StartWizardStep::Model;
+
+    assert!(matches!(
+        state.apply_event(key(KeyCode::Tab)),
+        StartWizardAction::Continue
+    ));
+    assert_eq!(state.step, StartWizardStep::Motion);
+
+    assert!(matches!(
+        state.apply_event(key(KeyCode::Tab)),
+        StartWizardAction::Continue
+    ));
+    assert_eq!(state.step, StartWizardStep::Music);
+
+    assert!(matches!(
+        state.apply_event(key(KeyCode::BackTab)),
+        StartWizardAction::Continue
+    ));
+    assert_eq!(state.step, StartWizardStep::Motion);
 }
 
 #[test]

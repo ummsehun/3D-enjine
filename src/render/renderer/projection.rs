@@ -1,6 +1,6 @@
 //! Projection, skinning, and morph target helpers.
 
-use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
+use glam::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 
 use crate::scene::{MeshCpu, SceneCpu, SdefVertexCpu};
 
@@ -147,17 +147,21 @@ pub(super) fn apply_morph_targets(
     vertex_index: usize,
     base_position: Vec3,
     base_normal: Vec3,
+    base_uv0: Vec2,
+    base_uv1: Vec2,
     morph_weights: Option<&[f32]>,
-) -> (Vec3, Vec3) {
+) -> (Vec3, Vec3, Vec2, Vec2) {
     let Some(weights) = morph_weights else {
-        return (base_position, base_normal);
+        return (base_position, base_normal, base_uv0, base_uv1);
     };
     if mesh.morph_targets.is_empty() || weights.is_empty() {
-        return (base_position, base_normal);
+        return (base_position, base_normal, base_uv0, base_uv1);
     }
 
     let mut out_position = base_position;
     let mut out_normal = base_normal;
+    let mut out_uv0 = base_uv0;
+    let mut out_uv1 = base_uv1;
     for (target_index, target) in mesh.morph_targets.iter().enumerate() {
         let weight = weights.get(target_index).copied().unwrap_or(0.0);
         if weight.abs() <= 1e-5 {
@@ -169,8 +173,18 @@ pub(super) fn apply_morph_targets(
         if let Some(delta) = target.normal_deltas.get(vertex_index) {
             out_normal += *delta * weight;
         }
+        if let Some(deltas) = target.uv0_deltas.as_ref() {
+            if let Some(delta) = deltas.get(vertex_index) {
+                out_uv0 += *delta * weight;
+            }
+        }
+        if let Some(deltas) = target.uv1_deltas.as_ref() {
+            if let Some(delta) = deltas.get(vertex_index) {
+                out_uv1 += *delta * weight;
+            }
+        }
     }
-    (out_position, out_normal.normalize_or_zero())
+    (out_position, out_normal.normalize_or_zero(), out_uv0, out_uv1)
 }
 
 pub(super) fn project_mesh_vertices(
@@ -190,8 +204,25 @@ pub(super) fn project_mesh_vertices(
             .get(index)
             .copied()
             .unwrap_or(Vec3::new(0.0, 1.0, 0.0));
-        let (morphed_pos, morphed_normal) =
-            apply_morph_targets(mesh, index, *position, base_normal, morph_weights);
+        let base_uv0 = mesh
+            .uv0
+            .as_ref()
+            .and_then(|values| values.get(index).copied())
+            .unwrap_or(glam::Vec2::ZERO);
+        let base_uv1 = mesh
+            .uv1
+            .as_ref()
+            .and_then(|values| values.get(index).copied())
+            .unwrap_or(base_uv0);
+        let (morphed_pos, morphed_normal, morphed_uv0, morphed_uv1) = apply_morph_targets(
+            mesh,
+            index,
+            *position,
+            base_normal,
+            base_uv0,
+            base_uv1,
+            morph_weights,
+        );
         let (skinned_pos, skinned_normal) =
             apply_skin(mesh, index, morphed_pos, morphed_normal, skin_matrices);
         let world_pos = model.transform_point3(skinned_pos);
@@ -211,16 +242,6 @@ pub(super) fn project_mesh_vertices(
             (1.0 - (ndc.y * 0.5 + 0.5)) * ((height as f32) - 1.0),
         );
         let depth = (ndc.z + 1.0) * 0.5;
-        let uv0 = mesh
-            .uv0
-            .as_ref()
-            .and_then(|values| values.get(index).copied())
-            .unwrap_or(glam::Vec2::ZERO);
-        let uv1 = mesh
-            .uv1
-            .as_ref()
-            .and_then(|values| values.get(index).copied())
-            .unwrap_or(uv0);
         let vertex_color = mesh
             .colors_rgba
             .as_ref()
@@ -231,8 +252,8 @@ pub(super) fn project_mesh_vertices(
             depth,
             world_pos,
             world_normal,
-            uv0,
-            uv1,
+            uv0: morphed_uv0,
+            uv1: morphed_uv1,
             vertex_color,
             material_index: mesh.material_index,
         });
@@ -243,7 +264,7 @@ pub(super) fn project_mesh_vertices(
 mod tests {
     use super::*;
     use crate::scene::{MeshCpu, SdefVertexCpu};
-    use glam::{Mat4, Vec3};
+    use glam::{Mat4, Vec2, Vec3};
 
     #[test]
     fn apply_skin_prefers_sdef_over_linear_fallback() {
@@ -313,5 +334,43 @@ mod tests {
         );
 
         assert!((position - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn apply_morph_targets_applies_uv_offsets() {
+        let mesh = MeshCpu {
+            positions: vec![Vec3::new(1.0, 0.0, 0.0)],
+            normals: vec![Vec3::Y],
+            uv0: Some(vec![Vec2::new(0.2, 0.3)]),
+            uv1: Some(vec![Vec2::new(0.4, 0.5)]),
+            colors_rgba: None,
+            material_index: None,
+            indices: vec![[0, 0, 0]],
+            joints4: None,
+            weights4: None,
+            sdef_vertices: None,
+            morph_targets: vec![crate::scene::MorphTargetCpu {
+                name: Some("uv".to_owned()),
+                position_deltas: vec![Vec3::ZERO],
+                normal_deltas: vec![Vec3::ZERO],
+                uv0_deltas: Some(vec![Vec2::new(0.1, -0.1)]),
+                uv1_deltas: Some(vec![Vec2::new(-0.2, 0.05)]),
+            }],
+        };
+
+        let (position, normal, uv0, uv1) = apply_morph_targets(
+            &mesh,
+            0,
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::Y,
+            Vec2::new(0.2, 0.3),
+            Vec2::new(0.4, 0.5),
+            Some(&[1.0]),
+        );
+
+        assert!((position - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
+        assert!((normal - Vec3::Y).length() < 1e-5);
+        assert!((uv0 - Vec2::new(0.3, 0.2)).length() < 1e-5);
+        assert!((uv1 - Vec2::new(0.2, 0.55)).length() < 1e-5);
     }
 }

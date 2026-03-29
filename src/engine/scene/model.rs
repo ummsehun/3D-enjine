@@ -11,6 +11,8 @@ pub struct MorphTargetCpu {
     pub name: Option<String>,
     pub position_deltas: Vec<Vec3>,
     pub normal_deltas: Vec<Vec3>,
+    pub uv0_deltas: Option<Vec<Vec2>>,
+    pub uv1_deltas: Option<Vec<Vec2>>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +127,7 @@ pub struct TextureCpu {
 #[derive(Debug, Clone)]
 pub struct Node {
     pub name: Option<String>,
+    pub name_en: Option<String>,
     pub parent: Option<usize>,
     pub children: Vec<usize>,
     pub base_translation: Vec3,
@@ -294,6 +297,7 @@ pub fn cube_scene() -> SceneCpu {
 
     let node = Node {
         name: Some("CubeRoot".to_owned()),
+        name_en: None,
         parent: None,
         children: Vec::new(),
         base_translation: Vec3::ZERO,

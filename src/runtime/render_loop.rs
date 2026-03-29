@@ -18,14 +18,14 @@ use crate::{
         interaction::{freefly_camera, orbit_camera, update_camera_director},
         options::RuntimeSyncProfileContext,
         state::{
-            dynamic_clip_planes, format_runtime_status, jitter_scale_for_lod, overlay_osd,
-            RuntimeCameraSettings,
+            RuntimeCameraSettings, RuntimePmxSettings, dynamic_clip_planes, format_runtime_status,
+            jitter_scale_for_lod, overlay_osd,
         },
         sync_profile::SyncProfileMode,
     },
     scene::{
-        resolve_cell_aspect, AudioReactiveMode, CameraControlMode, CameraMode, CellAspectMode,
-        RenderConfig, RenderOutputMode, SceneCpu,
+        AudioReactiveMode, CameraControlMode, CameraMode, CellAspectMode, RenderConfig,
+        RenderOutputMode, SceneCpu, resolve_cell_aspect,
     },
 };
 
@@ -52,6 +52,7 @@ pub(crate) fn run_scene_interactive(
     wasd_mode: CameraControlMode,
     freefly_speed: f32,
     camera_settings: RuntimeCameraSettings,
+    pmx_settings: RuntimePmxSettings,
     sync_profile: Option<RuntimeSyncProfileContext>,
 ) -> Result<()> {
     let mut state = bootstrap_runtime(
@@ -68,6 +69,7 @@ pub(crate) fn run_scene_interactive(
         wasd_mode,
         freefly_speed,
         camera_settings.clone(),
+        pmx_settings,
         sync_profile,
     )?;
 
@@ -142,6 +144,16 @@ pub(crate) fn run_scene_interactive(
             state.config.sync_kp,
             clip_duration,
         );
+        if clip_duration.is_some()
+            && state
+                .prev_animation_time
+                .is_some_and(|previous| animation_time + 1e-4 < previous)
+        {
+            if let Some(physics_state) = state.pmx_physics_state.as_mut() {
+                physics_state.reset(&state.scene);
+            }
+        }
+        state.prev_animation_time = Some(animation_time);
         let scene = &state.scene;
         let physics_state = state.pmx_physics_state.as_mut();
         state.pipeline.prepare_frame(

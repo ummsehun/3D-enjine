@@ -5,10 +5,10 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use glam::Vec3;
 
 use crate::{
-    runtime::interaction_camera::{freefly_rotate, freefly_translate, FreeFlyDirection},
+    runtime::interaction_camera::{FreeFlyDirection, freefly_rotate, freefly_translate},
     runtime::state::{
-        is_terminal_size_unstable, RuntimeContrastPreset, RuntimeInputResult, SYNC_OFFSET_LIMIT_MS,
-        SYNC_OFFSET_STEP_MS,
+        RuntimeContrastPreset, RuntimeInputResult, SYNC_OFFSET_LIMIT_MS, SYNC_OFFSET_STEP_MS,
+        is_terminal_size_unstable,
     },
     scene::{
         BrailleProfile, CameraControlMode, CinematicCameraMode, ColorMode, FreeFlyState, SceneCpu,

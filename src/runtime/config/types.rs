@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use glam::Vec3;
+
 use crate::scene::{
     AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
     CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
@@ -102,6 +104,11 @@ pub struct GasciiConfig {
     pub sync_kp: f32,
     pub sync_profile_dir: PathBuf,
     pub sync_profile_mode: SyncProfileMode,
+    // --- PMX Physics ---
+    pub pmx_gravity: Vec3,
+    pub pmx_warmup_steps: u32,
+    pub pmx_unit_step: f32,
+    pub pmx_max_substeps: usize,
     // --- Preprocess / Upscale ---
     pub upscale_factor: u32,
     pub upscale_sharpen: f32,
@@ -182,6 +189,10 @@ impl Default for GasciiConfig {
             sync_kp: 0.15,
             sync_profile_dir: PathBuf::from("assets/sync"),
             sync_profile_mode: SyncProfileMode::Auto,
+            pmx_gravity: Vec3::new(0.0, -9.8, 0.0),
+            pmx_warmup_steps: 24,
+            pmx_unit_step: 0.008,
+            pmx_max_substeps: 8,
             upscale_factor: 2,
             upscale_sharpen: 0.20,
             triangle_stride: 1,

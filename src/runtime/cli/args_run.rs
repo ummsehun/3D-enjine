@@ -162,6 +162,14 @@ pub struct RunArgs {
     pub sync_hard_snap_ms: Option<u32>,
     #[arg(long)]
     pub sync_kp: Option<f32>,
+    #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"])]
+    pub pmx_gravity: Option<Vec<f32>>,
+    #[arg(long)]
+    pub pmx_warmup_steps: Option<u32>,
+    #[arg(long)]
+    pub pmx_unit_step: Option<f32>,
+    #[arg(long)]
+    pub pmx_max_substeps: Option<usize>,
     #[arg(long, default_value_t = 60.0)]
     pub fov_deg: f32,
     #[arg(long, default_value_t = 0.1)]

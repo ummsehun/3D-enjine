@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::runtime::cli::{PreprocessArgs, PreprocessPresetArg};
@@ -12,8 +12,8 @@ use crate::runtime::cli::{PreprocessArgs, PreprocessPresetArg};
 mod image_ops;
 
 use self::image_ops::{
-    classify_image_color_spaces, extract_image_source_bytes, set_image_as_data_uri_png,
-    upscale_image_bytes, ImageColorSpace, PreprocessReport, SharpenPolicy,
+    ImageColorSpace, PreprocessReport, SharpenPolicy, classify_image_color_spaces,
+    extract_image_source_bytes, set_image_as_data_uri_png, upscale_image_bytes,
 };
 
 pub fn run_preprocess(args: &PreprocessArgs) -> Result<()> {

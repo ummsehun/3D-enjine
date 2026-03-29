@@ -23,9 +23,11 @@ fn discover_stage_sets_classifies_ready_and_convert() {
             && matches!(s.status, StageStatus::NeedsConvert)
             && s.pmx_path.is_some()
     }));
-    assert!(stages
-        .iter()
-        .any(|s| s.name == "empty_stage" && matches!(s.status, StageStatus::Invalid)));
+    assert!(
+        stages
+            .iter()
+            .any(|s| s.name == "empty_stage" && matches!(s.status, StageStatus::Invalid))
+    );
 }
 
 #[test]

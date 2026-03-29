@@ -1,0 +1,4 @@
+interface:
+  display_name: "Senior Code Reviewer"
+  short_description: "Strict senior-level code review"
+  default_prompt: "Use $senior-code-reviewer to review this diff as a strict senior engineer and call out production risks first."

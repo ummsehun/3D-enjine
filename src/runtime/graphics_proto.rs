@@ -6,11 +6,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 
 use crate::{
-    renderer::{pixel_frame_from_cells, FrameBuffers},
+    renderer::{FrameBuffers, pixel_frame_from_cells},
     scene::{
         GraphicsProtocol, KittyCompression, KittyPipelineMode, KittyTransport, RecoverStrategy,
     },

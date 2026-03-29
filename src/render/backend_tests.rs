@@ -3,9 +3,9 @@ use crate::pipeline::FramePipeline;
 use crate::render::gpu::GpuRenderer;
 use crate::renderer::{Camera, FrameBuffers, GlyphRamp, RenderScratch};
 use crate::scene::{
-    cube_scene, MaterialAlphaMode, MaterialCpu, MeshCpu, MeshInstance, MeshLayer, MorphTargetCpu,
-    Node, RenderConfig, SkinCpu, TextureColorSpace, TextureCpu, TextureFilterMode,
-    TextureSamplerMode, TextureSamplingMode, TextureVOrigin, TextureWrapMode, UvTransform2D,
+    MaterialAlphaMode, MaterialCpu, MeshCpu, MeshInstance, MeshLayer, MorphTargetCpu, Node,
+    RenderConfig, SkinCpu, TextureColorSpace, TextureCpu, TextureFilterMode, TextureSamplerMode,
+    TextureSamplingMode, TextureVOrigin, TextureWrapMode, UvTransform2D, cube_scene,
 };
 use glam::{Quat, Vec2, Vec3};
 use std::{
@@ -128,10 +128,13 @@ fn build_shared_morph_scene() -> crate::scene::SceneCpu {
                 Vec3::new(0.0, 0.0, 0.0),
             ],
             normal_deltas: vec![Vec3::ZERO, Vec3::ZERO, Vec3::ZERO],
+            uv0_deltas: None,
+            uv1_deltas: None,
         }],
     };
     let node = Node {
         name: Some("root".to_owned()),
+        name_en: None,
         parent: None,
         children: Vec::new(),
         base_translation: Vec3::ZERO,
@@ -140,6 +143,7 @@ fn build_shared_morph_scene() -> crate::scene::SceneCpu {
     };
     let node_right = Node {
         name: Some("root_right".to_owned()),
+        name_en: None,
         parent: None,
         children: Vec::new(),
         base_translation: Vec3::new(0.45, 0.0, 0.0),
@@ -198,6 +202,7 @@ fn build_skinning_scene() -> crate::scene::SceneCpu {
 
     let root = Node {
         name: Some("root".to_owned()),
+        name_en: None,
         parent: None,
         children: vec![1, 2],
         base_translation: Vec3::ZERO,
@@ -206,6 +211,7 @@ fn build_skinning_scene() -> crate::scene::SceneCpu {
     };
     let joint_a = Node {
         name: Some("joint_a".to_owned()),
+        name_en: None,
         parent: Some(0),
         children: Vec::new(),
         base_translation: Vec3::new(0.0, 1.0, 0.0),
@@ -214,6 +220,7 @@ fn build_skinning_scene() -> crate::scene::SceneCpu {
     };
     let joint_b = Node {
         name: Some("joint_b".to_owned()),
+        name_en: None,
         parent: Some(0),
         children: Vec::new(),
         base_translation: Vec3::new(0.0, -1.0, 0.0),

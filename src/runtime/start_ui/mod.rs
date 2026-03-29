@@ -28,8 +28,8 @@ use ratatui::prelude::*;
 use crate::runtime::{
     config::UiLanguage,
     start_ui_helpers::{
-        clamp_ratatui_area, cycle_index, tr, RATATUI_SAFE_MAX_CELLS, RENDER_FIELD_COUNT,
-        START_FPS_OPTIONS, SYNC_OFFSET_LIMIT_MS, SYNC_OFFSET_STEP_MS,
+        RATATUI_SAFE_MAX_CELLS, RENDER_FIELD_COUNT, START_FPS_OPTIONS, SYNC_OFFSET_LIMIT_MS,
+        SYNC_OFFSET_STEP_MS, clamp_ratatui_area, cycle_index, tr,
     },
     terminal::{RatatuiSession, TerminalProfile},
 };

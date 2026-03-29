@@ -2,7 +2,7 @@ use super::*;
 
 use super::state::StartWizardState;
 use super::types::{StageStatus, StartWizardStep, UiBreakpoint};
-use crate::runtime::start_ui_helpers::{aspect_preview_ascii, MIN_HEIGHT, MIN_WIDTH};
+use crate::runtime::start_ui_helpers::{MIN_HEIGHT, MIN_WIDTH, aspect_preview_ascii};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 pub(super) fn draw_header(

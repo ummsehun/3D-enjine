@@ -283,7 +283,13 @@ impl StartWizardState {
     fn tab_forward(&mut self) {
         match self.step {
             StartWizardStep::Branch => self.step = StartWizardStep::Model,
-            StartWizardStep::Model => self.step = StartWizardStep::Music,
+            StartWizardStep::Model => {
+                self.step = if matches!(self.branch, ModelBranch::PmxVmd) {
+                    StartWizardStep::Motion
+                } else {
+                    StartWizardStep::Music
+                };
+            }
             StartWizardStep::Motion => self.step = StartWizardStep::Music,
             StartWizardStep::Music => self.step = StartWizardStep::Stage,
             StartWizardStep::Stage => self.step = StartWizardStep::Camera,
@@ -305,7 +311,13 @@ impl StartWizardState {
             StartWizardStep::Branch => {}
             StartWizardStep::Model => {}
             StartWizardStep::Motion => self.step = StartWizardStep::Model,
-            StartWizardStep::Music => self.step = StartWizardStep::Model,
+            StartWizardStep::Music => {
+                self.step = if matches!(self.branch, ModelBranch::PmxVmd) {
+                    StartWizardStep::Motion
+                } else {
+                    StartWizardStep::Model
+                };
+            }
             StartWizardStep::Stage => self.step = StartWizardStep::Music,
             StartWizardStep::Camera => self.step = StartWizardStep::Stage,
             StartWizardStep::Render => {

@@ -6,7 +6,7 @@ use crate::render::background::theme_palette;
 use crate::render::renderer::braille::{braille_thresholds, compose_braille_cells};
 use crate::render::renderer::shading::contrast_params;
 use crate::render::renderer::{
-    encode_ansi_frame, exposure_bias_multiplier, BrailleSubpixelBuffers, FrameBuffers, GlyphRamp,
+    BrailleSubpixelBuffers, FrameBuffers, GlyphRamp, encode_ansi_frame, exposure_bias_multiplier,
 };
 use crate::render::renderer_glyph::{glyph_for_intensity, select_charset};
 use crate::render::renderer_material::sample_material;

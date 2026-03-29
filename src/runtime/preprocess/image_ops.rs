@@ -1,8 +1,8 @@
 use std::{fs, io::Cursor, path::Path};
 
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use image::{imageops, DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Rgba, RgbaImage};
+use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use image::{DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Rgba, RgbaImage, imageops};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

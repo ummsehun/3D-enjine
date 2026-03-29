@@ -7,8 +7,8 @@ use crate::{
         state::{cap_render_size, is_terminal_size_unstable},
     },
     scene::{
-        estimate_cell_aspect_from_window, kitty_internal_resolution, KittyInternalResPreset,
-        RenderConfig, RenderOutputMode,
+        KittyInternalResPreset, RenderConfig, RenderOutputMode, estimate_cell_aspect_from_window,
+        kitty_internal_resolution,
     },
     terminal::TerminalSession,
 };

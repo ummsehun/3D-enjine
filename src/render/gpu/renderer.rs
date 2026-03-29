@@ -2,12 +2,15 @@ use std::collections::HashMap;
 
 use glam::{Mat3, Mat4};
 
-use crate::renderer::{exposure_bias_multiplier, Camera, FrameBuffers, GlyphRamp, PixelFrame, RenderScratch, RenderStats};
+use crate::render::backend_gpu::GpuRendererState;
+use crate::renderer::{
+    Camera, FrameBuffers, GlyphRamp, PixelFrame, RenderScratch, RenderStats,
+    exposure_bias_multiplier,
+};
 use crate::scene::{
     MaterialAlphaMode, MeshLayer, RenderConfig, SceneCpu, StageRole, TextureSamplingMode,
     TextureVOrigin, TextureWrapMode,
 };
-use crate::render::backend_gpu::GpuRendererState;
 
 mod cache;
 
@@ -78,9 +81,12 @@ impl GpuRenderer {
 
     fn ensure_pipeline(&mut self) -> Result<(), GpuError> {
         if self.pipeline.is_none() {
-            self.pipeline = Some(GpuPipeline::new(&self.ctx, wgpu::TextureFormat::Rgba8UnormSrgb)?);
+            self.pipeline = Some(GpuPipeline::new(
+                &self.ctx,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            )?);
         }
-        
+
         // Initialize default texture (1x1 white) if not done yet
         if self.default_texture.is_none() {
             let default_tex = GpuTexture::placeholder(&self.ctx);
@@ -106,19 +112,23 @@ impl GpuRenderer {
         self.ensure_pipeline()?;
         self.ensure_scene_cache(scene);
         self.cache_textures_for_scene(scene, config);
-        
+
         let pipeline = self.pipeline.as_ref().unwrap();
 
         // Reuse or create render target based on size
         let needs_new_target = self.cached_render_target_size != Some((width, height));
         if needs_new_target {
-            self.cached_render_target = Some(RenderTarget::new(&self.ctx, TextureSize::new(width, height))?);
+            self.cached_render_target = Some(RenderTarget::new(
+                &self.ctx,
+                TextureSize::new(width, height),
+            )?);
             self.cached_render_target_size = Some((width, height));
         }
         let render_target = self.cached_render_target.as_ref().unwrap();
 
         let aspect = (width as f32 * config.cell_aspect).max(1.0) / height as f32;
-        let projection = crate::math::perspective_matrix(config.fov_deg, aspect, config.near, config.far);
+        let projection =
+            crate::math::perspective_matrix(config.fov_deg, aspect, config.near, config.far);
         let view = Mat4::look_at_rh(camera.eye, camera.target, camera.up);
         let view_projection = projection * view;
         let model_rotation = Mat4::from_rotation_y(model_rotation_y);
@@ -144,8 +154,11 @@ impl GpuRenderer {
 
             let material = self.get_material_params(scene, mesh.material_index, config);
 
-            let morph_weights = instance_morph_weights.get(instance_index).map(|v| v.as_slice());
-            let has_morph = morph_weights.is_some_and(|w| !w.is_empty()) && !mesh.morph_targets.is_empty();
+            let morph_weights = instance_morph_weights
+                .get(instance_index)
+                .map(|v| v.as_slice());
+            let has_morph =
+                morph_weights.is_some_and(|w| !w.is_empty()) && !mesh.morph_targets.is_empty();
             let has_skin = instance
                 .skin_index
                 .and_then(|skin_idx| skin_matrices.get(skin_idx))
@@ -169,7 +182,8 @@ impl GpuRenderer {
                 if let Some(joints) = skin_matrices.get(skin_idx) {
                     for (i, mat) in joints.iter().take(512).enumerate() {
                         let offset = i * 16;
-                        joint_matrix_data[offset..offset + 16].copy_from_slice(&mat.to_cols_array());
+                        joint_matrix_data[offset..offset + 16]
+                            .copy_from_slice(&mat.to_cols_array());
                     }
                 }
             }
@@ -185,13 +199,33 @@ impl GpuRenderer {
                 mvp_matrix: mvp.to_cols_array_2d(),
                 model_matrix: model.to_cols_array_2d(),
                 normal_matrix: [
-                    [normal_matrix.x_axis.x, normal_matrix.x_axis.y, normal_matrix.x_axis.z, 0.0],
-                    [normal_matrix.y_axis.x, normal_matrix.y_axis.y, normal_matrix.y_axis.z, 0.0],
-                    [normal_matrix.z_axis.x, normal_matrix.z_axis.y, normal_matrix.z_axis.z, 0.0],
+                    [
+                        normal_matrix.x_axis.x,
+                        normal_matrix.x_axis.y,
+                        normal_matrix.x_axis.z,
+                        0.0,
+                    ],
+                    [
+                        normal_matrix.y_axis.x,
+                        normal_matrix.y_axis.y,
+                        normal_matrix.y_axis.z,
+                        0.0,
+                    ],
+                    [
+                        normal_matrix.z_axis.x,
+                        normal_matrix.z_axis.y,
+                        normal_matrix.z_axis.z,
+                        0.0,
+                    ],
                 ],
                 camera_pos: [camera.eye.x, camera.eye.y, camera.eye.z, 1.0],
                 light_dir: [0.3, 0.7, 0.6, 0.0],
-                lighting_params: [config.ambient.max(0.0), config.diffuse_strength.max(0.0), config.specular_strength.max(0.0), config.specular_power.max(1.0)],
+                lighting_params: [
+                    config.ambient.max(0.0),
+                    config.diffuse_strength.max(0.0),
+                    config.specular_strength.max(0.0),
+                    config.specular_power.max(1.0),
+                ],
                 material_color: material.color,
                 fog_params: [0.0, 100.0, config.fog_strength.max(0.0), 0.0],
                 uv_transform: [
@@ -216,7 +250,7 @@ impl GpuRenderer {
                     Self::focus_lod_bias(config),
                     material
                         .texture_index
-                    .and_then(|tex_idx| scene.textures.get(tex_idx))
+                        .and_then(|tex_idx| scene.textures.get(tex_idx))
                         .map(|texture| texture.mip_levels.len() as f32)
                         .unwrap_or(0.0),
                     0.0,
@@ -235,13 +269,17 @@ impl GpuRenderer {
 
             pipeline.update_uniforms(&self.ctx.queue, &uniforms);
 
-            let mut encoder = self.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("render_encoder"),
-            });
+            let mut encoder =
+                self.ctx
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("render_encoder"),
+                    });
             let mut render_pass = render_target.begin_render_pass(&mut encoder, !had_draw);
             render_pass.set_pipeline(&pipeline.render_pipeline);
             render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
-            let texture_bind_group = material.texture_index
+            let texture_bind_group = material
+                .texture_index
                 .and_then(|tex_idx| {
                     let key = TextureBindingKey {
                         texture_index: tex_idx,
@@ -267,7 +305,8 @@ impl GpuRenderer {
                 render_pass.set_bind_group(1, bg, &[]);
             }
             render_pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass
+                .set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
             drop(render_pass);
             self.ctx.queue.submit(std::iter::once(encoder.finish()));
@@ -275,11 +314,16 @@ impl GpuRenderer {
         }
 
         if !had_draw {
-            let mut clear_encoder = self.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("render_clear_encoder"),
-            });
+            let mut clear_encoder =
+                self.ctx
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("render_clear_encoder"),
+                    });
             let _ = render_target.begin_render_pass(&mut clear_encoder, true);
-            self.ctx.queue.submit(std::iter::once(clear_encoder.finish()));
+            self.ctx
+                .queue
+                .submit(std::iter::once(clear_encoder.finish()));
         }
 
         let rgba_data = render_target.readback(&self.ctx.device, &self.ctx.queue)?;
@@ -400,7 +444,10 @@ fn convert_pixel_frame_to_ascii(
 mod tests {
     use super::*;
     use crate::engine::pipeline::FramePipeline;
-    use crate::scene::{cube_scene, MeshInstance, MeshLayer, MorphTargetCpu, Node, RenderConfig, RenderMode, RenderBackend, SceneCpu};
+    use crate::scene::{
+        MeshInstance, MeshLayer, MorphTargetCpu, Node, RenderBackend, RenderConfig, RenderMode,
+        SceneCpu, cube_scene,
+    };
     use glam::{Quat, Vec3};
 
     fn build_mixed_morph_scene() -> SceneCpu {
@@ -413,10 +460,13 @@ mod tests {
                 .map(|p| Vec3::new(0.0, if p.y > 0.0 { 0.45 } else { 0.0 }, 0.0))
                 .collect(),
             normal_deltas: vec![Vec3::ZERO; scene.meshes[0].positions.len()],
+            uv0_deltas: None,
+            uv1_deltas: None,
         }];
         scene.nodes = vec![
             Node {
                 name: Some("left".to_owned()),
+                name_en: None,
                 parent: None,
                 children: Vec::new(),
                 base_translation: Vec3::new(-0.55, 0.0, 0.0),
@@ -425,6 +475,7 @@ mod tests {
             },
             Node {
                 name: Some("right".to_owned()),
+                name_en: None,
                 parent: None,
                 children: Vec::new(),
                 base_translation: Vec3::new(0.55, 0.0, 0.0),

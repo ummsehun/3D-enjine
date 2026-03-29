@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use glam::{Quat, Vec3};
 
 use crate::{
@@ -318,6 +318,7 @@ pub(crate) fn apply_stage_transform(scene: &mut SceneCpu, transform: StageTransf
     }
     scene.nodes.push(crate::scene::Node {
         name: Some("StageTransformRoot".to_owned()),
+        name_en: None,
         parent: None,
         children,
         base_translation: Vec3::new(

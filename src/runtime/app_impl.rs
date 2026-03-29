@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::{
     animation::ChannelTarget,
@@ -26,26 +26,26 @@ use crate::{
             merge_scenes, resolve_camera_vmd_choice, resolve_stage_choice_from_selector,
             resolved_camera_dir, resolved_stage_dir, resolved_stage_selector,
         },
-        config::{load_gascii_config, GasciiConfig},
+        config::{GasciiConfig, load_gascii_config},
         graphics_proto::{cleanup_orphan_shm_files, cleanup_shm_registry},
         interaction::max_scene_vertices,
         options::{
-            resolve_effective_camera_mode, resolve_sync_options_for_run,
-            resolve_sync_profile_for_assets, resolve_sync_profile_options_for_run,
-            resolve_visual_options_for_bench, resolve_visual_options_for_run,
-            RuntimeSyncProfileContext,
+            RuntimeSyncProfileContext, resolve_effective_camera_mode, resolve_sync_options_for_run,
+            resolve_pmx_settings_for_run, resolve_sync_profile_for_assets,
+            resolve_sync_profile_options_for_run, resolve_visual_options_for_bench,
+            resolve_visual_options_for_run,
         },
         preprocess::run_preprocess,
         preview::run_preview_server,
         render_loop::run_scene_interactive,
         start_ui::StageStatus,
-        state::{resolve_runtime_backend, RuntimeCameraSettings},
+        state::{RuntimeCameraSettings, resolve_runtime_backend},
         sync_profile::{
-            build_profile_key, default_profile_store_path, SyncProfileEntry, SyncProfileMode,
-            SyncProfileStore,
+            SyncProfileEntry, SyncProfileMode, SyncProfileStore, build_profile_key,
+            default_profile_store_path,
         },
     },
-    scene::{resolve_cell_aspect, CellAspectMode, RenderConfig, SceneCpu},
+    scene::{CellAspectMode, RenderConfig, SceneCpu, resolve_cell_aspect},
 };
 
 static PANIC_HOOK_ONCE: Once = Once::new();
@@ -101,6 +101,7 @@ fn run_interactive(args: RunArgs) -> Result<()> {
         resolved_camera_vmd_path.as_deref(),
     );
     let sync = resolve_sync_options_for_run(&args, &runtime_cfg, sync_profile_entry.as_ref());
+    let pmx_settings = resolve_pmx_settings_for_run(&args, &runtime_cfg);
     let (mut scene, mut animation_index, rotates_without_animation) = load_scene_for_run(&args)?;
 
     if matches!(args.scene, RunSceneArg::Pmx) {
@@ -215,6 +216,7 @@ fn run_interactive(args: RunArgs) -> Result<()> {
         visual.wasd_mode,
         visual.freefly_speed,
         camera_settings,
+        pmx_settings,
         sync_profile_context,
     )
 }

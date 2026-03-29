@@ -1,7 +1,11 @@
 use super::*;
+
+use super::state::StartWizardState;
+use super::types::{StageStatus, StartWizardStep, UiBreakpoint};
 use crate::runtime::start_ui_helpers::{
     aspect_preview_ascii, duration_label, fps_label, target_fps_for_profile, MIN_HEIGHT, MIN_WIDTH,
 };
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 pub(super) fn draw_header(
     frame: &mut Frame,

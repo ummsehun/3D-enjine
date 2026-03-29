@@ -427,4 +427,3 @@ fn terminal_size_unstable_only_for_invalid_or_sentinel_values() {
     assert!(!is_terminal_size_unstable(432, 102));
     assert!(!is_terminal_size_unstable(900, 140));
 }
-

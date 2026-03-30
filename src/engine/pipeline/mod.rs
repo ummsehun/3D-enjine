@@ -1,16 +1,15 @@
 use glam::Mat4;
 
+use crate::animation::ChannelTarget;
 use crate::engine::pmx_rig::{
     apply_append_bone_transforms, apply_pmx_bone_axis_constraints, compute_bone_position,
     solve_ik_chain_ccd,
 };
-use crate::{animation::ChannelTarget, scene::NodePose};
-use crate::{
-    animation::{
-        compute_global_matrices_in_place, compute_skin_matrices_in_place, reset_poses_from_nodes,
-    },
-    scene::SceneCpu,
+use crate::engine::skeleton::{
+    compute_global_matrices_in_place, compute_skin_matrices_in_place, reset_poses_from_nodes,
 };
+use crate::scene::NodePose;
+use crate::scene::SceneCpu;
 
 pub(crate) trait PhysicsStepper {
     fn step_physics(

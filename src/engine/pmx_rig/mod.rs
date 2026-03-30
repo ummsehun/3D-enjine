@@ -5,6 +5,12 @@
 
 use glam::{Mat4, Quat, Vec3};
 
+mod physics_meta;
+
+pub use physics_meta::{
+    PmxJointCpu, PmxJointKind, PmxPhysicsMeta, PmxRigidBodyCpu, PmxRigidCalcMethod, PmxRigidShape,
+};
+
 /// A single link in an IK chain.
 #[derive(Debug, Clone)]
 pub struct IKLink {
@@ -143,16 +149,26 @@ impl PmxRigMeta {
     pub fn count_bones_with_local_grant(&self) -> usize {
         self.bones
             .iter()
-            .filter(|bone| bone.grant_transform.as_ref().is_some_and(|grant| grant.is_local))
+            .filter(|bone| {
+                bone.grant_transform
+                    .as_ref()
+                    .is_some_and(|grant| grant.is_local)
+            })
             .count()
     }
 
     pub fn count_bones_with_fixed_axis(&self) -> usize {
-        self.bones.iter().filter(|bone| bone.uses_fixed_axis()).count()
+        self.bones
+            .iter()
+            .filter(|bone| bone.uses_fixed_axis())
+            .count()
     }
 
     pub fn count_bones_with_local_axis(&self) -> usize {
-        self.bones.iter().filter(|bone| bone.uses_local_axis()).count()
+        self.bones
+            .iter()
+            .filter(|bone| bone.uses_local_axis())
+            .count()
     }
 
     pub fn count_bones_with_external_parent(&self) -> usize {
@@ -166,131 +182,6 @@ impl PmxRigMeta {
         let (order, cycle_bones) = build_grant_evaluation_order(&self.bones);
         self.grant_evaluation_order = order;
         self.grant_cycle_bones = cycle_bones;
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PmxRigidShape {
-    Sphere,
-    Box,
-    Capsule,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PmxRigidCalcMethod {
-    Static,
-    Dynamic,
-    DynamicWithBonePosition,
-}
-
-#[derive(Debug, Clone)]
-pub struct PmxRigidBodyCpu {
-    pub name: String,
-    pub name_en: String,
-    pub bone_index: i32,
-    pub group: u8,
-    pub un_collision_group_flag: u16,
-    pub form: PmxRigidShape,
-    pub size: Vec3,
-    pub position: Vec3,
-    pub rotation: Vec3,
-    pub mass: f32,
-    pub move_resist: f32,
-    pub rotation_resist: f32,
-    pub repulsion: f32,
-    pub friction: f32,
-    pub calc_method: PmxRigidCalcMethod,
-}
-
-#[derive(Debug, Clone)]
-pub enum PmxJointKind {
-    Spring6Dof {
-        a_rigid_index: i32,
-        b_rigid_index: i32,
-        position: Vec3,
-        rotation: Vec3,
-        move_limit_down: Vec3,
-        move_limit_up: Vec3,
-        rotation_limit_down: Vec3,
-        rotation_limit_up: Vec3,
-        spring_const_move: Vec3,
-        spring_const_rotation: Vec3,
-    },
-    SixDof {
-        a_rigid_index: i32,
-        b_rigid_index: i32,
-        position: Vec3,
-        rotation: Vec3,
-        move_limit_down: Vec3,
-        move_limit_up: Vec3,
-        rotation_limit_down: Vec3,
-        rotation_limit_up: Vec3,
-    },
-    P2P {
-        a_rigid_index: i32,
-        b_rigid_index: i32,
-        position: Vec3,
-        rotation: Vec3,
-    },
-    ConeTwist {
-        a_rigid_index: i32,
-        b_rigid_index: i32,
-        swing_span1: f32,
-        swing_span2: f32,
-        twist_span: f32,
-        softness: f32,
-        bias_factor: f32,
-        relaxation_factor: f32,
-        damping: f32,
-        fix_thresh: f32,
-        enable_motor: bool,
-        max_motor_impulse: f32,
-        motor_target_in_constraint_space: Vec3,
-    },
-    Slider {
-        a_rigid_index: i32,
-        b_rigid_index: i32,
-        lower_linear_limit: f32,
-        upper_linear_limit: f32,
-        lower_angle_limit: f32,
-        upper_angle_limit: f32,
-        power_linear_motor: bool,
-        target_linear_motor_velocity: f32,
-        max_linear_motor_force: f32,
-        power_angler_motor: bool,
-        target_angler_motor_velocity: f32,
-        max_angler_motor_force: f32,
-    },
-    Hinge {
-        a_rigid_index: i32,
-        b_rigid_index: i32,
-        low: f32,
-        high: f32,
-        softness: f32,
-        bias_factor: f32,
-        relaxation_factor: f32,
-        enable_motor: bool,
-        target_velocity: f32,
-        max_motor_impulse: f32,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub struct PmxJointCpu {
-    pub name: String,
-    pub name_en: String,
-    pub kind: PmxJointKind,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct PmxPhysicsMeta {
-    pub rigid_bodies: Vec<PmxRigidBodyCpu>,
-    pub joints: Vec<PmxJointCpu>,
-}
-
-impl PmxPhysicsMeta {
-    pub fn is_empty(&self) -> bool {
-        self.rigid_bodies.is_empty() && self.joints.is_empty()
     }
 }
 
@@ -349,9 +240,8 @@ pub fn solve_ik_chain_ccd(
                 .get(joint_idx)
                 .and_then(|node| node.parent)
                 .map(|parent_index| {
-                    let (_, rotation, _) =
-                        compute_global_transform(parent_index, nodes, poses)
-                            .to_scale_rotation_translation();
+                    let (_, rotation, _) = compute_global_transform(parent_index, nodes, poses)
+                        .to_scale_rotation_translation();
                     rotation
                 })
                 .unwrap_or(Quat::IDENTITY);
@@ -375,10 +265,7 @@ pub fn solve_ik_chain_ccd(
 /// This preserves the effect of "additional parent" bones within the current
 /// simplified `NodePose` representation. It does not attempt to reproduce the
 /// full PMX local-space inheritance matrix model.
-pub fn apply_append_bone_transforms(
-    meta: &PmxRigMeta,
-    poses: &mut [crate::scene::NodePose],
-) {
+pub fn apply_append_bone_transforms(meta: &PmxRigMeta, poses: &mut [crate::scene::NodePose]) {
     let mut resolved_poses = poses.to_vec();
     let grant_order = if meta.grant_evaluation_order.is_empty() {
         (0..meta.bones.len()).collect::<Vec<_>>()
@@ -394,7 +281,10 @@ pub fn apply_append_bone_transforms(
             continue;
         };
         let source_index = grant.parent_index;
-        if bone_index >= poses.len() || source_index >= resolved_poses.len() || source_index == bone_index {
+        if bone_index >= poses.len()
+            || source_index >= resolved_poses.len()
+            || source_index == bone_index
+        {
             continue;
         }
         let weight = grant.weight.clamp(0.0, 1.0);
@@ -430,10 +320,7 @@ pub fn apply_append_bone_transforms(
 /// This does not recreate Blender's full bone constraint system. It only
 /// reduces the most visible axis drift by re-basing bones with local axes and
 /// constraining fixed-axis bones to twist around their declared axis.
-pub fn apply_pmx_bone_axis_constraints(
-    meta: &PmxRigMeta,
-    poses: &mut [crate::scene::NodePose],
-) {
+pub fn apply_pmx_bone_axis_constraints(meta: &PmxRigMeta, poses: &mut [crate::scene::NodePose]) {
     for (bone_index, bone) in meta.bones.iter().enumerate() {
         if bone_index >= poses.len() {
             continue;

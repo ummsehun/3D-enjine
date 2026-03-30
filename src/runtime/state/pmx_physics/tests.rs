@@ -1,9 +1,9 @@
 use glam::{EulerRot, Mat4, Quat, Vec3};
 
-use crate::engine::animation::compute_global_matrices_in_place;
 use crate::engine::pmx_rig::{
     PmxJointCpu, PmxJointKind, PmxPhysicsMeta, PmxRigidBodyCpu, PmxRigidCalcMethod, PmxRigidShape,
 };
+use crate::engine::skeleton::compute_global_matrices_in_place;
 use crate::runtime::state::RuntimePmxSettings;
 use crate::scene::{Node, NodePose, SceneCpu};
 

@@ -1,8 +1,8 @@
 use glam::{EulerRot, Mat4, Quat, Vec3};
 
 use crate::engine::{
-    animation::{compute_global_matrices_in_place, reset_poses_from_nodes},
     pmx_rig::{PmxJointKind, PmxRigidCalcMethod},
+    skeleton::{compute_global_matrices_in_place, reset_poses_from_nodes},
 };
 use crate::scene::SceneCpu;
 

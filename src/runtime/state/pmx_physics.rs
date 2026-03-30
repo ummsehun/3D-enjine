@@ -1,8 +1,8 @@
 use glam::{Mat4, Quat, Vec3};
 
-use crate::engine::animation::{compute_global_matrices_in_place, reset_poses_from_nodes};
 use crate::engine::pipeline::PhysicsStepper;
 use crate::engine::pmx_rig::{PmxRigidCalcMethod, PmxRigidShape};
+use crate::engine::skeleton::{compute_global_matrices_in_place, reset_poses_from_nodes};
 use crate::scene::{NodePose, SceneCpu};
 
 use super::RuntimePmxSettings;

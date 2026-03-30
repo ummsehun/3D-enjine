@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::skeleton::{compute_global_matrices, default_poses};
 use crate::scene::Node;
 
 #[test]

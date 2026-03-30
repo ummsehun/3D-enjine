@@ -35,22 +35,13 @@ pub(super) fn step(
                     body.linear_velocity = Vec3::ZERO;
                     body.angular_velocity = Vec3::ZERO;
                 }
-                PmxRigidCalcMethod::Dynamic | PmxRigidCalcMethod::DynamicWithBonePosition => {
+                PmxRigidCalcMethod::Dynamic => {
                     let resist = body.linear_damping.clamp(0.0, 0.995);
                     let body_response =
                         (1.0 + physics.average_repulsion)
                             / (1.0 + physics.average_mass + physics.average_radius.max(0.000_1));
-                    let follow = match body.calc_method {
-                        PmxRigidCalcMethod::Dynamic => {
-                            (solver.dynamic_follow_gain * (1.0 - resist) * body_response)
-                                .clamp(0.01, 0.35)
-                        }
-                        PmxRigidCalcMethod::DynamicWithBonePosition => {
-                            (solver.dynamic_with_bone_follow_gain * (1.0 - resist) * body_response)
-                                .clamp(0.01, 0.45)
-                        }
-                        PmxRigidCalcMethod::Static => 0.0,
-                    };
+                    let follow = (solver.dynamic_follow_gain * (1.0 - resist) * body_response)
+                        .clamp(0.01, 0.35);
                     let stiffness = (body.repulsion.max(0.0) + physics.average_repulsion) * follow
                         + follow;
                     let damping = (body.linear_damping
@@ -74,6 +65,18 @@ pub(super) fn step(
                     let rot_alpha = (1.0
                         - (-((body.angular_damping * solver.rotation_limit_gain)
                             + solver.rotation_limit_gain)
+                            * sub_dt)
+                            .exp())
+                    .clamp(0.0, 1.0);
+                    body.rotation = body.rotation.slerp(target_rot, rot_alpha).normalize();
+                }
+                PmxRigidCalcMethod::DynamicWithBonePosition => {
+                    body.position = target_pos;
+                    body.linear_velocity = Vec3::ZERO;
+                    body.angular_velocity = Vec3::ZERO;
+                    let rot_alpha = (1.0
+                        - (-((body.angular_damping * solver.rotation_limit_gain)
+                            + solver.dynamic_with_bone_follow_gain)
                             * sub_dt)
                             .exp())
                     .clamp(0.0, 1.0);
@@ -231,6 +234,13 @@ pub(super) fn step(
             if matches!(body.calc_method, PmxRigidCalcMethod::Static) {
                 continue;
             }
+            if matches!(body.calc_method, PmxRigidCalcMethod::DynamicWithBonePosition) {
+                let (target_pos, target_rot) =
+                    helpers::target_body_transform(scene, pre_physics_globals, body);
+                body.position = target_pos;
+                body.linear_velocity = Vec3::ZERO;
+                body.rotation = body.rotation.slerp(target_rot, 0.45).normalize();
+            }
             let floor_y = physics.derived_floor_y;
             if body.position.y < floor_y {
                 body.position.y = floor_y;
@@ -251,9 +261,21 @@ pub(super) fn step(
         {
             continue;
         }
+        if matches!(body.calc_method, PmxRigidCalcMethod::DynamicWithBonePosition)
+            && bone_is_in_physics_conflicting_ik_chain(scene, bone_index)
+        {
+            continue;
+        }
 
         let bone_rotation = body.rotation * body.local_rotation.conjugate();
-        let bone_translation = body.position - bone_rotation * body.local_translation;
+        let bone_translation = match body.calc_method {
+            PmxRigidCalcMethod::DynamicWithBonePosition => pre_physics_globals
+                .get(bone_index)
+                .map(|global| global.transform_point3(Vec3::ZERO))
+                .unwrap_or(body.position - bone_rotation * body.local_translation),
+            PmxRigidCalcMethod::Dynamic => body.position - bone_rotation * body.local_translation,
+            PmxRigidCalcMethod::Static => continue,
+        };
         body_bone_globals[bone_index] = Some(Mat4::from_scale_rotation_translation(
             Vec3::ONE,
             bone_rotation,
@@ -289,4 +311,29 @@ pub(super) fn step(
         poses[bone_index].rotation = rotation;
         poses[bone_index].scale = scale;
     }
+}
+
+fn bone_is_in_physics_conflicting_ik_chain(scene: &SceneCpu, bone_index: usize) -> bool {
+    let Some(rig_meta) = scene.pmx_rig_meta.as_ref() else {
+        return false;
+    };
+    let Some(physics_meta) = scene.pmx_physics_meta.as_ref() else {
+        return false;
+    };
+
+    rig_meta.ik_chains.iter().any(|chain| {
+        let chain_contains_bone = chain.target_bone_index == bone_index
+            || chain.controller_bone_index == bone_index
+            || chain.links.iter().any(|link| link.bone_index == bone_index);
+        if !chain_contains_bone {
+            return false;
+        }
+        chain.links.iter().any(|link| {
+            physics_meta.rigid_bodies.iter().any(|rigid| {
+                rigid.bone_index >= 0
+                    && rigid.bone_index as usize == link.bone_index
+                    && !matches!(rigid.calc_method, PmxRigidCalcMethod::Static)
+            })
+        })
+    })
 }

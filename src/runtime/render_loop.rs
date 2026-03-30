@@ -18,14 +18,14 @@ use crate::{
         interaction::{freefly_camera, orbit_camera, update_camera_director},
         options::RuntimeSyncProfileContext,
         state::{
-            RuntimeCameraSettings, RuntimePmxSettings, dynamic_clip_planes, format_runtime_status,
-            jitter_scale_for_lod, overlay_osd,
+            dynamic_clip_planes, format_runtime_status, jitter_scale_for_lod, overlay_osd,
+            RuntimeCameraSettings, RuntimePmxSettings,
         },
         sync_profile::SyncProfileMode,
     },
     scene::{
-        AudioReactiveMode, CameraControlMode, CameraMode, CellAspectMode, RenderConfig,
-        RenderOutputMode, SceneCpu, resolve_cell_aspect,
+        resolve_cell_aspect, AudioReactiveMode, CameraControlMode, CameraMode, CellAspectMode,
+        RenderConfig, RenderOutputMode, SceneCpu,
     },
 };
 
@@ -72,6 +72,10 @@ pub(crate) fn run_scene_interactive(
         pmx_settings,
         sync_profile,
     )?;
+
+    if let Some(audio) = state.audio_sync.as_ref() {
+        audio.playback.sink.play();
+    }
 
     let clip_duration = state
         .animation_index

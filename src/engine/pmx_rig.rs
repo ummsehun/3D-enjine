@@ -3,7 +3,7 @@
 //! This module stores PMX-specific bone metadata that doesn't fit into the
 //! generic `SceneCpu`/`Node` structures, specifically IK chain definitions.
 
-use glam::{Mat3, Mat4, Quat, Vec3};
+use glam::{Mat4, Quat, Vec3};
 
 /// A single link in an IK chain.
 #[derive(Debug, Clone)]
@@ -106,6 +106,10 @@ pub struct PmxRigMeta {
     pub bones: Vec<PmxBoneMeta>,
     /// All IK chains defined in the model.
     pub ik_chains: Vec<IKChain>,
+    /// Grant evaluation order from parent to child.
+    pub grant_evaluation_order: Vec<usize>,
+    /// Grant bones that participated in a detected cycle.
+    pub grant_cycle_bones: Vec<usize>,
 }
 
 impl PmxRigMeta {
@@ -156,6 +160,12 @@ impl PmxRigMeta {
             .iter()
             .filter(|bone| bone.uses_external_parent())
             .count()
+    }
+
+    pub fn rebuild_grant_evaluation_order(&mut self) {
+        let (order, cycle_bones) = build_grant_evaluation_order(&self.bones);
+        self.grant_evaluation_order = order;
+        self.grant_cycle_bones = cycle_bones;
     }
 }
 
@@ -335,9 +345,22 @@ pub fn solve_ik_chain_ccd(
             // Rotation that aligns effector direction towards target direction
             let rotation = rotation_between(to_effector_norm, to_target_norm);
 
-            // Apply rotation to this joint's pose
+            let parent_rotation = nodes
+                .get(joint_idx)
+                .and_then(|node| node.parent)
+                .map(|parent_index| {
+                    let (_, rotation, _) =
+                        compute_global_transform(parent_index, nodes, poses)
+                            .to_scale_rotation_translation();
+                    rotation
+                })
+                .unwrap_or(Quat::IDENTITY);
+            let local_rotation_delta =
+                (parent_rotation.conjugate() * rotation * parent_rotation).normalize();
+
+            // Apply rotation to this joint's local pose
             let current_rotation = poses[joint_idx].rotation;
-            poses[joint_idx].rotation = (rotation * current_rotation).normalize();
+            poses[joint_idx].rotation = (local_rotation_delta * current_rotation).normalize();
 
             // Apply angle limit if specified
             if let Some(limits) = &link.angle_limits {
@@ -356,17 +379,22 @@ pub fn apply_append_bone_transforms(
     meta: &PmxRigMeta,
     poses: &mut [crate::scene::NodePose],
 ) {
-    let source_poses = poses.to_vec();
+    let mut resolved_poses = poses.to_vec();
+    let grant_order = if meta.grant_evaluation_order.is_empty() {
+        (0..meta.bones.len()).collect::<Vec<_>>()
+    } else {
+        meta.grant_evaluation_order.clone()
+    };
 
-    for (bone_index, bone) in meta.bones.iter().enumerate() {
+    for bone_index in grant_order {
+        let Some(bone) = meta.bones.get(bone_index) else {
+            continue;
+        };
         let Some(grant) = bone.grant_transform.as_ref() else {
             continue;
         };
-        if grant.is_local {
-            continue;
-        }
         let source_index = grant.parent_index;
-        if bone_index >= poses.len() || source_index >= source_poses.len() || source_index == bone_index {
+        if bone_index >= poses.len() || source_index >= resolved_poses.len() || source_index == bone_index {
             continue;
         }
         let weight = grant.weight.clamp(0.0, 1.0);
@@ -374,13 +402,25 @@ pub fn apply_append_bone_transforms(
             continue;
         }
 
-        let source_pose = source_poses[source_index];
-        if grant.affects_translation {
-            poses[bone_index].translation += source_pose.translation * weight;
-        }
-        if grant.affects_rotation {
-            let append_rotation = Quat::IDENTITY.slerp(source_pose.rotation, weight);
-            poses[bone_index].rotation = (append_rotation * poses[bone_index].rotation).normalize();
+        let source_pose = resolved_poses[source_index];
+        if let Some(target_pose) = poses.get_mut(bone_index) {
+            if grant.affects_translation {
+                let translated = if grant.is_local {
+                    target_pose.rotation * (source_pose.translation * weight)
+                } else {
+                    source_pose.translation * weight
+                };
+                target_pose.translation += translated;
+            }
+            if grant.affects_rotation {
+                let append_rotation = Quat::IDENTITY.slerp(source_pose.rotation, weight);
+                target_pose.rotation = if grant.is_local {
+                    (target_pose.rotation * append_rotation).normalize()
+                } else {
+                    (append_rotation * target_pose.rotation).normalize()
+                };
+            }
+            resolved_poses[bone_index] = *target_pose;
         }
     }
 }
@@ -401,22 +441,8 @@ pub fn apply_pmx_bone_axis_constraints(
 
         let mut rotation = poses[bone_index].rotation;
 
-        if bone.uses_local_axis() {
-            if let Some(local_basis) = local_axis_basis(bone.local_axis_x, bone.local_axis_z) {
-                rotation = (local_basis * rotation * local_basis.conjugate()).normalize();
-            }
-        }
-
         if bone.uses_fixed_axis() {
-            let fixed_axis = if bone.uses_local_axis() {
-                if let Some(local_basis) = local_axis_basis(bone.local_axis_x, bone.local_axis_z) {
-                    (local_basis * bone.fixed_axis).normalize_or_zero()
-                } else {
-                    bone.fixed_axis.normalize_or_zero()
-                }
-            } else {
-                bone.fixed_axis.normalize_or_zero()
-            };
+            let fixed_axis = bone.fixed_axis.normalize_or_zero();
 
             if fixed_axis.length_squared() > f32::EPSILON {
                 rotation = twist_only(rotation, fixed_axis);
@@ -433,6 +459,22 @@ pub fn compute_bone_position(
     nodes: &[crate::scene::Node],
     poses: &[crate::scene::NodePose],
 ) -> Vec3 {
+    compute_global_transform(bone_index, nodes, poses).transform_point3(Vec3::ZERO)
+}
+
+fn compute_global_position(
+    bone_index: usize,
+    nodes: &[crate::scene::Node],
+    poses: &[crate::scene::NodePose],
+) -> Vec3 {
+    compute_bone_position(bone_index, nodes, poses)
+}
+
+fn compute_global_transform(
+    bone_index: usize,
+    nodes: &[crate::scene::Node],
+    poses: &[crate::scene::NodePose],
+) -> Mat4 {
     let mut transform = Mat4::IDENTITY;
     let mut current_idx = Some(bone_index);
     let mut visited = vec![false; nodes.len()];
@@ -444,23 +486,13 @@ pub fn compute_bone_position(
         visited[idx] = true;
 
         let pose = &poses[idx];
-
         let local =
             Mat4::from_scale_rotation_translation(pose.scale, pose.rotation, pose.translation);
         transform = local * transform;
-
         current_idx = nodes[idx].parent;
     }
 
-    transform.transform_point3(Vec3::ZERO)
-}
-
-fn compute_global_position(
-    bone_index: usize,
-    nodes: &[crate::scene::Node],
-    poses: &[crate::scene::NodePose],
-) -> Vec3 {
-    compute_bone_position(bone_index, nodes, poses)
+    transform
 }
 
 /// Create a rotation that rotates `from` direction to `to` direction.
@@ -499,26 +531,6 @@ fn apply_angle_limits(rotation: &mut Quat, limits: &[Vec3; 2], max_angle: f32) {
     *rotation = Quat::from_euler(glam::EulerRot::YXZ, yaw, pitch, roll);
 }
 
-fn local_axis_basis(local_axis_x: Vec3, local_axis_z: Vec3) -> Option<Quat> {
-    let x = local_axis_x.normalize_or_zero();
-    let z_raw = local_axis_z.normalize_or_zero();
-    if x.length_squared() <= f32::EPSILON || z_raw.length_squared() <= f32::EPSILON {
-        return None;
-    }
-
-    let z = (z_raw - x * z_raw.dot(x)).normalize_or_zero();
-    if z.length_squared() <= f32::EPSILON {
-        return None;
-    }
-
-    let y = z.cross(x).normalize_or_zero();
-    if y.length_squared() <= f32::EPSILON {
-        return None;
-    }
-
-    Some(Quat::from_mat3(&Mat3::from_cols(x, y, z)))
-}
-
 fn twist_only(rotation: Quat, axis: Vec3) -> Quat {
     let axis = axis.normalize_or_zero();
     if axis.length_squared() <= f32::EPSILON {
@@ -533,6 +545,60 @@ fn twist_only(rotation: Quat, axis: Vec3) -> Quat {
     } else {
         twist.normalize()
     }
+}
+
+fn build_grant_evaluation_order(bones: &[PmxBoneMeta]) -> (Vec<usize>, Vec<usize>) {
+    let mut grant_bones = bones
+        .iter()
+        .enumerate()
+        .filter_map(|(bone_index, bone)| bone.grant_transform.as_ref().map(|_| bone_index))
+        .collect::<Vec<_>>();
+    grant_bones.sort_by_key(|&bone_index| (bones[bone_index].deform_depth, bone_index));
+
+    let mut state = vec![0_u8; bones.len()];
+    let mut order = Vec::with_capacity(grant_bones.len());
+    let mut cycle_bones = Vec::new();
+
+    fn visit(
+        bone_index: usize,
+        bones: &[PmxBoneMeta],
+        state: &mut [u8],
+        order: &mut Vec<usize>,
+        cycle_bones: &mut Vec<usize>,
+    ) {
+        if bone_index >= bones.len() {
+            return;
+        }
+        match state[bone_index] {
+            2 => return,
+            1 => {
+                cycle_bones.push(bone_index);
+                return;
+            }
+            _ => {}
+        }
+        let Some(grant) = bones[bone_index].grant_transform.as_ref() else {
+            return;
+        };
+
+        state[bone_index] = 1;
+        if grant.parent_index < bones.len()
+            && grant.parent_index != bone_index
+            && bones[grant.parent_index].grant_transform.is_some()
+        {
+            visit(grant.parent_index, bones, state, order, cycle_bones);
+        }
+        state[bone_index] = 2;
+        order.push(bone_index);
+    }
+
+    for bone_index in grant_bones {
+        visit(bone_index, bones, &mut state, &mut order, &mut cycle_bones);
+    }
+
+    cycle_bones.sort_unstable();
+    cycle_bones.dedup();
+    (order, cycle_bones)
 }
 
 #[cfg(test)]
@@ -675,6 +741,8 @@ mod tests {
                 },
             ],
             ik_chains: Vec::new(),
+            grant_evaluation_order: vec![1],
+            grant_cycle_bones: Vec::new(),
         };
         let mut poses = vec![
             crate::scene::NodePose {
@@ -720,6 +788,8 @@ mod tests {
                 ik_limit: 0.0,
             }],
             ik_chains: Vec::new(),
+            grant_evaluation_order: Vec::new(),
+            grant_cycle_bones: Vec::new(),
         };
         let mut poses = vec![crate::scene::NodePose {
             translation: Vec3::ZERO,
@@ -734,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_pmx_bone_axis_constraints_rebases_local_axis() {
+    fn test_apply_pmx_bone_axis_constraints_keeps_local_axis_metadata_passive() {
         let meta = PmxRigMeta {
             bones: vec![PmxBoneMeta {
                 grant_transform: None,
@@ -757,6 +827,8 @@ mod tests {
                 ik_limit: 0.0,
             }],
             ik_chains: Vec::new(),
+            grant_evaluation_order: Vec::new(),
+            grant_cycle_bones: Vec::new(),
         };
         let mut poses = vec![crate::scene::NodePose {
             translation: Vec3::ZERO,
@@ -767,7 +839,115 @@ mod tests {
         let before = poses[0].rotation;
         apply_pmx_bone_axis_constraints(&meta, &mut poses);
 
-        assert!((poses[0].rotation - before).length() > 1e-4);
+        assert!(poses[0].rotation.dot(before).abs() > 0.999_99);
         assert!((poses[0].rotation.length() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_grant_evaluation_order_applies_parent_before_child() {
+        let mut meta = PmxRigMeta {
+            bones: vec![
+                PmxBoneMeta {
+                    grant_transform: None,
+                    name: "root".to_owned(),
+                    name_en: "root".to_owned(),
+                    position: Vec3::ZERO,
+                    parent_index: -1,
+                    deform_depth: 0,
+                    boneflag: 0,
+                    offset: Vec3::ZERO,
+                    child: -1,
+                    append_bone_index: -1,
+                    append_weight: 0.0,
+                    fixed_axis: Vec3::ZERO,
+                    local_axis_x: Vec3::ZERO,
+                    local_axis_z: Vec3::ZERO,
+                    key_value: 0,
+                    ik_target_index: -1,
+                    ik_iter_count: 0,
+                    ik_limit: 0.0,
+                },
+                PmxBoneMeta {
+                    grant_transform: Some(PmxGrantTransform {
+                        parent_index: 0,
+                        weight: 0.5,
+                        is_local: false,
+                        affects_rotation: false,
+                        affects_translation: true,
+                    }),
+                    name: "mid".to_owned(),
+                    name_en: "mid".to_owned(),
+                    position: Vec3::ZERO,
+                    parent_index: 0,
+                    deform_depth: 1,
+                    boneflag: 0x0200,
+                    offset: Vec3::ZERO,
+                    child: -1,
+                    append_bone_index: 0,
+                    append_weight: 0.5,
+                    fixed_axis: Vec3::ZERO,
+                    local_axis_x: Vec3::ZERO,
+                    local_axis_z: Vec3::ZERO,
+                    key_value: 0,
+                    ik_target_index: -1,
+                    ik_iter_count: 0,
+                    ik_limit: 0.0,
+                },
+                PmxBoneMeta {
+                    grant_transform: Some(PmxGrantTransform {
+                        parent_index: 1,
+                        weight: 1.0,
+                        is_local: false,
+                        affects_rotation: false,
+                        affects_translation: true,
+                    }),
+                    name: "leaf".to_owned(),
+                    name_en: "leaf".to_owned(),
+                    position: Vec3::ZERO,
+                    parent_index: 1,
+                    deform_depth: 2,
+                    boneflag: 0x0200,
+                    offset: Vec3::ZERO,
+                    child: -1,
+                    append_bone_index: 1,
+                    append_weight: 1.0,
+                    fixed_axis: Vec3::ZERO,
+                    local_axis_x: Vec3::ZERO,
+                    local_axis_z: Vec3::ZERO,
+                    key_value: 0,
+                    ik_target_index: -1,
+                    ik_iter_count: 0,
+                    ik_limit: 0.0,
+                },
+            ],
+            ik_chains: Vec::new(),
+            grant_evaluation_order: Vec::new(),
+            grant_cycle_bones: Vec::new(),
+        };
+        meta.rebuild_grant_evaluation_order();
+        assert_eq!(meta.grant_evaluation_order, vec![1, 2]);
+
+        let mut poses = vec![
+            crate::scene::NodePose {
+                translation: Vec3::new(2.0, 0.0, 0.0),
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            crate::scene::NodePose {
+                translation: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            crate::scene::NodePose {
+                translation: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+        ];
+
+        apply_append_bone_transforms(&meta, &mut poses);
+
+        assert!((poses[1].translation - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
+        assert!((poses[2].translation - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
     }
 }

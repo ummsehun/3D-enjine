@@ -15,18 +15,17 @@ use crate::{
         audio_sync::{AudioSyncRuntime, LoadedCameraTrack},
         graphics_proto::detect_supported_protocol,
         interaction::{freefly_state_from_camera, max_scene_vertices, orbit_camera},
-        options::{RuntimeSyncProfileContext, resolve_effective_color_mode},
+        options::{resolve_effective_color_mode, RuntimeSyncProfileContext},
         scene_analysis::compute_scene_framing,
         state::{
-            ColorRecoveryState, ContinuousSyncState, ExposureAutoBoost, HYBRID_GRAPHICS_MAX_CELLS,
-            RuntimeAdaptiveQuality, RuntimeCameraSettings, RuntimeCameraState,
-            RuntimePmxSettings,
-            RuntimeContrastPreset, SYNC_OFFSET_LIMIT_MS, ScreenFitController, cap_render_size,
-            normalize_graphics_settings, resolve_runtime_backend,
+            cap_render_size, normalize_graphics_settings, resolve_runtime_backend,
+            ColorRecoveryState, ContinuousSyncState, ExposureAutoBoost, RuntimeAdaptiveQuality,
+            RuntimeCameraSettings, RuntimeCameraState, RuntimeContrastPreset, RuntimePmxSettings,
+            ScreenFitController, HYBRID_GRAPHICS_MAX_CELLS, SYNC_OFFSET_LIMIT_MS,
         },
     },
     scene::{
-        CameraControlMode, RenderConfig, RenderOutputMode, SceneCpu, StageRole, resolve_cell_aspect,
+        resolve_cell_aspect, CameraControlMode, RenderConfig, RenderOutputMode, SceneCpu, StageRole,
     },
     terminal::{PresentMode, TerminalProfile, TerminalSession},
 };
@@ -344,10 +343,6 @@ pub(super) fn bootstrap_runtime(
     let fixed_step = 1.0 / 120.0_f32;
     let sim_time = 0.0_f32;
     let sim_accum = 0.0_f32;
-
-    if let Some(audio) = audio_sync.as_ref() {
-        audio.playback.sink.play();
-    }
 
     Ok(BootstrapState {
         terminal,

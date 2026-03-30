@@ -441,6 +441,8 @@ mod tests {
                     limit_angle: 0.25,
                     links: Vec::new(),
                 }],
+                grant_evaluation_order: vec![0],
+                grant_cycle_bones: Vec::new(),
             }),
             pmx_physics_meta: Some(PmxPhysicsMeta {
                 rigid_bodies: vec![crate::engine::pmx_rig::PmxRigidBodyCpu {

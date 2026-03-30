@@ -99,7 +99,7 @@ fn static_body_follows_bone_target() {
                 un_collision_group_flag: 0,
                 form: PmxRigidShape::Sphere,
                 size: Vec3::splat(0.1),
-                position: Vec3::ZERO,
+                position: Vec3::new(1.0, 2.0, 3.0),
                 rotation: Vec3::ZERO,
                 mass: 1.0,
                 move_resist: 0.0,
@@ -223,6 +223,63 @@ fn dynamic_with_bone_position_follows_source_bone_more_tightly() {
 }
 
 #[test]
+fn dynamic_with_bone_position_preserves_bone_translation_on_writeback() {
+    let scene = SceneCpu {
+        nodes: vec![Node {
+            name: Some("root".to_owned()),
+            name_en: None,
+            parent: None,
+            children: Vec::new(),
+            base_translation: Vec3::new(0.0, 1.0, 0.0),
+            base_rotation: Quat::IDENTITY,
+            base_scale: Vec3::ONE,
+        }],
+        pmx_physics_meta: Some(PmxPhysicsMeta {
+            rigid_bodies: vec![PmxRigidBodyCpu {
+                name: "rb".to_owned(),
+                name_en: "rb".to_owned(),
+                bone_index: 0,
+                group: 0,
+                un_collision_group_flag: 0,
+                form: PmxRigidShape::Sphere,
+                size: Vec3::splat(0.1),
+                position: Vec3::new(0.0, 1.0, 0.0),
+                rotation: Vec3::ZERO,
+                mass: 1.0,
+                move_resist: 0.0,
+                rotation_resist: 0.0,
+                repulsion: 0.0,
+                friction: 0.0,
+                calc_method: PmxRigidCalcMethod::DynamicWithBonePosition,
+            }],
+            joints: Vec::new(),
+        }),
+        ..SceneCpu::default()
+    };
+
+    let mut state =
+        PmxPhysicsState::from_scene(&scene, RuntimePmxSettings::default()).expect("physics state");
+    state.bodies[0].position = Vec3::new(5.0, 7.0, -2.0);
+    state.bodies[0].rotation = Quat::from_rotation_y(0.5);
+    let mut poses = vec![NodePose {
+        translation: scene.nodes[0].base_translation,
+        rotation: Quat::IDENTITY,
+        scale: Vec3::ONE,
+    }];
+    let globals = vec![Mat4::from_scale_rotation_translation(
+        Vec3::ONE,
+        Quat::IDENTITY,
+        scene.nodes[0].base_translation,
+    )];
+
+    state.step(&scene, &mut poses, &globals, 0.000_001);
+
+    let expected_rotation = state.bodies[0].rotation * state.bodies[0].local_rotation.conjugate();
+    assert!((poses[0].translation - scene.nodes[0].base_translation).length() < 1e-4);
+    assert!((poses[0].rotation - expected_rotation).length() < 1e-4);
+}
+
+#[test]
 fn collision_mask_skips_blocked_pairs() {
     let scene = single_root_scene(vec![
         PmxRigidBodyCpu {
@@ -299,6 +356,7 @@ fn shape_support_radius_differs_from_max_element_fallback() {
             linear_damping: 0.0,
             angular_damping: 0.0,
             repulsion: 0.0,
+            friction: 0.0,
         },
         Vec3::X,
     );
@@ -324,6 +382,7 @@ fn shape_support_radius_differs_from_max_element_fallback() {
             linear_damping: 0.0,
             angular_damping: 0.0,
             repulsion: 0.0,
+            friction: 0.0,
         },
         Vec3::X,
     );
@@ -348,6 +407,7 @@ fn shape_support_radius_differs_from_max_element_fallback() {
                 linear_damping: 0.0,
                 angular_damping: 0.0,
                 repulsion: 0.0,
+                friction: 0.0,
             },
             Vec3::Z,
         ) - 0.2)
@@ -624,4 +684,74 @@ fn hinge_joint_clamps_rotation_in_joint_frame() {
     let rel =
         (state.bodies[0].rotation.conjugate() * state.bodies[1].rotation).to_euler(EulerRot::YXZ);
     assert!(rel.1.abs() <= 0.15);
+}
+
+#[test]
+fn friction_damps_dynamic_velocity() {
+    let scene = single_root_scene(vec![PmxRigidBodyCpu {
+        name: "rb".to_owned(),
+        name_en: "rb".to_owned(),
+        bone_index: -1,
+        group: 0,
+        un_collision_group_flag: 0,
+        form: PmxRigidShape::Sphere,
+        size: Vec3::splat(0.2),
+        position: Vec3::new(0.0, 1.0, 0.0),
+        rotation: Vec3::ZERO,
+        mass: 1.0,
+        move_resist: 0.0,
+        rotation_resist: 0.0,
+        repulsion: 0.0,
+        friction: 1.0,
+        calc_method: PmxRigidCalcMethod::Dynamic,
+    }]);
+    let mut state =
+        PmxPhysicsState::from_scene(&scene, RuntimePmxSettings::default()).expect("physics state");
+    state.bodies[0].linear_velocity = Vec3::new(6.0, 0.0, 0.0);
+    let mut poses = vec![NodePose {
+        translation: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        scale: Vec3::ONE,
+    }];
+    let globals = vec![Mat4::IDENTITY];
+
+    state.step(&scene, &mut poses, &globals, 0.016);
+
+    assert!(state.bodies[0].linear_velocity.x < 6.0);
+}
+
+#[test]
+fn warmup_and_reset_keep_state_finite() {
+    let scene = single_root_scene(vec![PmxRigidBodyCpu {
+        name: "rb".to_owned(),
+        name_en: "rb".to_owned(),
+        bone_index: -1,
+        group: 0,
+        un_collision_group_flag: 0,
+        form: PmxRigidShape::Sphere,
+        size: Vec3::splat(0.1),
+        position: Vec3::new(0.0, 2.0, 0.0),
+        rotation: Vec3::ZERO,
+        mass: 1.0,
+        move_resist: 0.1,
+        rotation_resist: 0.1,
+        repulsion: 0.0,
+        friction: 0.2,
+        calc_method: PmxRigidCalcMethod::Dynamic,
+    }]);
+    let settings = RuntimePmxSettings {
+        warmup_steps: 12,
+        ..RuntimePmxSettings::default()
+    };
+    let mut state = PmxPhysicsState::from_scene(&scene, settings).expect("physics state");
+
+    state.warmup(&scene);
+    assert!(state.bodies[0].position.is_finite());
+    assert!(state.bodies[0].rotation.is_finite());
+
+    state.bodies[0].position = Vec3::new(99.0, -99.0, 12.0);
+    state.reset(&scene);
+
+    assert!((state.bodies[0].position - Vec3::new(0.0, 2.0, 0.0)).length() < 1e-4);
+    assert!(state.bodies[0].linear_velocity.length_squared() <= f32::EPSILON);
 }

@@ -5,8 +5,8 @@
 
 use std::fmt::Write as _;
 
-pub use super::renderer_exposure::exposure_bias_multiplier;
-pub use super::renderer_glyph::GlyphRamp;
+pub use super::common::exposure::exposure_bias_multiplier;
+pub use super::common::glyph::GlyphRamp;
 
 mod braille;
 mod projection;
@@ -19,7 +19,7 @@ mod tests;
 
 pub use rendering::render_frame;
 
-use super::renderer_glyph::glyph_coverage;
+use super::common::glyph::glyph_coverage;
 use crate::scene::{AnsiQuantization, KittyPipelineMode, MaterialAlphaMode};
 
 #[derive(Debug, Clone, Copy)]

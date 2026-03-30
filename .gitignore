@@ -9,6 +9,3 @@ assets-local/
 # Added by cargo
 
 /target
-_mmd_tools
-_mmd_tools_check
-_mmd_tools_sugiany

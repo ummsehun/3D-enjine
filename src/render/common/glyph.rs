@@ -1,11 +1,11 @@
-use crate::scene::{ContrastProfile, DEFAULT_CHARSET, RenderConfig, RenderMode};
+use crate::scene::{ContrastProfile, RenderConfig, RenderMode, DEFAULT_CHARSET};
 
 const BRAILLE_RAMP: &str = "⠀⠂⠆⠖⠶⠷⠿⡿⣿";
 const ADAPTIVE_ASCII_LOW: [char; 9] = [' ', '.', ':', '=', '+', '*', '#', '%', '@'];
 const ADAPTIVE_ASCII_NORMAL: [char; 10] = [' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
 const ADAPTIVE_ASCII_HIGH: [char; 11] = [' ', ' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
 
-pub(super) fn glyph_coverage(glyph: char) -> f32 {
+pub(crate) fn glyph_coverage(glyph: char) -> f32 {
     if glyph == ' ' {
         return 0.0;
     }
@@ -53,7 +53,7 @@ impl GlyphRamp {
     }
 }
 
-pub(super) fn glyph_for_intensity(intensity: f32, charset: &[char]) -> char {
+pub(crate) fn glyph_for_intensity(intensity: f32, charset: &[char]) -> char {
     if charset.is_empty() {
         return ' ';
     }
@@ -62,7 +62,7 @@ pub(super) fn glyph_for_intensity(intensity: f32, charset: &[char]) -> char {
     charset[index]
 }
 
-pub(super) fn glyph_intensity(glyph: char, charset: &[char]) -> f32 {
+pub(crate) fn glyph_intensity(glyph: char, charset: &[char]) -> f32 {
     if charset.is_empty() {
         return 0.0;
     }
@@ -70,10 +70,14 @@ pub(super) fn glyph_intensity(glyph: char, charset: &[char]) -> f32 {
         let denom = charset.len().saturating_sub(1).max(1) as f32;
         return (index as f32 / denom).clamp(0.0, 1.0);
     }
-    if glyph == ' ' { 0.0 } else { 1.0 }
+    if glyph == ' ' {
+        0.0
+    } else {
+        1.0
+    }
 }
 
-pub(super) fn select_charset<'a>(
+pub(crate) fn select_charset<'a>(
     config: &RenderConfig,
     fallback: &'a [char],
     cells: usize,

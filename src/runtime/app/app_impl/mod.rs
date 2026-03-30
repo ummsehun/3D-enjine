@@ -254,7 +254,7 @@ fn bench(args: BenchArgs) -> Result<()> {
     let glyph_ramp = GlyphRamp::from_config(&config);
     let mut render_scratch = RenderScratch::with_capacity(max_scene_vertices(&scene));
     let camera = Camera::default();
-    let mut gpu_renderer_state = crate::render::backend_gpu::GpuRendererState::default();
+    let mut gpu_renderer_state = crate::render::backend::GpuRendererState::default();
 
     let benchmark_duration = Duration::from_secs_f32(args.seconds.max(0.1));
     let started = Instant::now();

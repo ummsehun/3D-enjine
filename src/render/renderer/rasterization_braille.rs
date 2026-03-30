@@ -4,12 +4,12 @@ use crate::scene::{MeshCpu, RenderConfig, SceneCpu};
 use super::braille::BrailleThresholds;
 use super::rasterization::perp_dot;
 use super::{ProjectedVertex, RasterPass, RenderStats, ThemePalette};
-use crate::render::renderer_color::{
+use crate::render::common::color::{
     boost_saturation, clarity_saturation_gain, color_scale_from_tonemap, luminance,
     model_color_for_intensity, scale_rgb, srgb_to_linear, to_display_rgb,
 };
-use crate::render::renderer_exposure::{push_histogram, tone_map_intensity};
-use crate::render::renderer_material::{resolve_material_props, sample_material};
+use crate::render::common::exposure::{push_histogram, tone_map_intensity};
+use crate::render::common::material::{resolve_material_props, sample_material};
 
 pub(super) fn rasterize_braille_mesh(
     mesh: &MeshCpu,

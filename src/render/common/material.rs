@@ -1,27 +1,27 @@
 use glam::{Vec2, Vec3};
 
-use crate::render::material_morph::apply_material_morph_to_index;
+use crate::render::morph::material::apply_material_morph_to_index;
 use crate::scene::{
     MaterialAlphaMode, MaterialToonSource, RenderConfig, SceneCpu, TextureColorSpace,
     TextureFilterMode, TextureSamplerMode, TextureSamplingMode, TextureWrapMode,
 };
 
-use super::renderer_color::srgb_to_linear;
-use super::renderer_texture::{
+use super::color::srgb_to_linear;
+use super::texture::{
     apply_uv_transform, prefer_sampling_for_focus, sample_texture_rgba, select_mip_level,
 };
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct MaterialSample {
-    pub(super) albedo_linear: [f32; 3],
-    pub(super) alpha: f32,
-    pub(super) emissive_linear: [f32; 3],
-    pub(super) alpha_mode: MaterialAlphaMode,
-    pub(super) alpha_cutoff: f32,
-    pub(super) double_sided: bool,
+pub(crate) struct MaterialSample {
+    pub(crate) albedo_linear: [f32; 3],
+    pub(crate) alpha: f32,
+    pub(crate) emissive_linear: [f32; 3],
+    pub(crate) alpha_mode: MaterialAlphaMode,
+    pub(crate) alpha_cutoff: f32,
+    pub(crate) double_sided: bool,
 }
 
-pub(super) fn resolve_material_props(
+pub(crate) fn resolve_material_props(
     scene: &SceneCpu,
     material_index: Option<usize>,
 ) -> MaterialSample {
@@ -49,7 +49,7 @@ pub(super) fn resolve_material_props(
     }
 }
 
-pub(super) fn sample_material(
+pub(crate) fn sample_material(
     scene: &SceneCpu,
     material_index: Option<usize>,
     uv0: Vec2,

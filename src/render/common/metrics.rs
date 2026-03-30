@@ -1,6 +1,6 @@
 use crate::render::renderer::{FrameBuffers, RenderStats};
 
-pub(super) fn visible_cell_ratio(frame: &FrameBuffers) -> f32 {
+pub(crate) fn visible_cell_ratio(frame: &FrameBuffers) -> f32 {
     let total = frame.depth.len();
     if total == 0 {
         return 0.0;
@@ -9,7 +9,7 @@ pub(super) fn visible_cell_ratio(frame: &FrameBuffers) -> f32 {
     (visible as f32) / (total as f32)
 }
 
-pub(super) fn apply_visible_metrics(
+pub(crate) fn apply_visible_metrics(
     stats: &mut RenderStats,
     frame: &FrameBuffers,
     subject_depth_cells: &[f32],

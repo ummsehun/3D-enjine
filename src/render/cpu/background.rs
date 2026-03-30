@@ -1,10 +1,9 @@
 use crate::scene::{ColorMode, DetailProfile, RenderConfig, StageRole, ThemeStyle};
 
-use super::renderer::FrameBuffers;
-use super::renderer::ThemePalette;
+use crate::render::renderer::{FrameBuffers, ThemePalette};
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct StageParams {
+pub(crate) struct StageParams {
     pub bg_luma_scale: f32,
     pub floor_grid_density: usize,
     pub fog_mul: f32,
@@ -12,10 +11,10 @@ pub(super) struct StageParams {
     pub particle_density: f32,
 }
 
-pub(super) const BACKGROUND_ASCII: [char; 4] = [' ', ' ', '.', ':'];
-pub(super) const BACKGROUND_BRAILLE: [char; 3] = [' ', '⠈', '⠐'];
+pub(crate) const BACKGROUND_ASCII: [char; 4] = [' ', ' ', '.', ':'];
+pub(crate) const BACKGROUND_BRAILLE: [char; 3] = [' ', '⠈', '⠐'];
 
-pub(super) fn stage_params(config: &RenderConfig) -> StageParams {
+pub(crate) fn stage_params(config: &RenderConfig) -> StageParams {
     match config.stage_level.min(4) {
         0 => StageParams {
             bg_luma_scale: 0.28,
@@ -55,7 +54,7 @@ pub(super) fn stage_params(config: &RenderConfig) -> StageParams {
     }
 }
 
-pub(super) fn theme_palette(style: ThemeStyle) -> ThemePalette {
+pub(crate) fn theme_palette(style: ThemeStyle) -> ThemePalette {
     match style {
         ThemeStyle::Theater => ThemePalette {
             shadow: [118, 106, 92],
@@ -115,7 +114,7 @@ fn hash01(x: usize, y: usize, salt: usize) -> f32 {
     (folded as f32) / (u32::MAX as f32)
 }
 
-pub(super) fn fill_background_ascii(
+pub(crate) fn fill_background_ascii(
     frame: &mut FrameBuffers,
     config: &RenderConfig,
     palette: ThemePalette,
@@ -206,7 +205,7 @@ pub(super) fn fill_background_ascii(
     }
 }
 
-pub(super) fn fill_background_braille(
+pub(crate) fn fill_background_braille(
     frame: &mut FrameBuffers,
     config: &RenderConfig,
     palette: ThemePalette,

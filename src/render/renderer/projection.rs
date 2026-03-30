@@ -184,7 +184,12 @@ pub(super) fn apply_morph_targets(
             }
         }
     }
-    (out_position, out_normal.normalize_or_zero(), out_uv0, out_uv1)
+    (
+        out_position,
+        out_normal.normalize_or_zero(),
+        out_uv0,
+        out_uv1,
+    )
 }
 
 pub(super) fn project_mesh_vertices(

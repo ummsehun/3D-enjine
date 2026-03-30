@@ -3,9 +3,9 @@ use crate::pipeline::FramePipeline;
 use crate::render::gpu::GpuRenderer;
 use crate::renderer::{Camera, FrameBuffers, GlyphRamp, RenderScratch};
 use crate::scene::{
-    MaterialAlphaMode, MaterialCpu, MeshCpu, MeshInstance, MeshLayer, MorphTargetCpu, Node,
-    RenderConfig, SkinCpu, TextureColorSpace, TextureCpu, TextureFilterMode, TextureSamplerMode,
-    TextureSamplingMode, TextureVOrigin, TextureWrapMode, UvTransform2D, cube_scene,
+    cube_scene, MaterialAlphaMode, MaterialCpu, MeshCpu, MeshInstance, MeshLayer, MorphTargetCpu,
+    Node, RenderConfig, SkinCpu, TextureColorSpace, TextureCpu, TextureFilterMode,
+    TextureSamplerMode, TextureSamplingMode, TextureVOrigin, TextureWrapMode, UvTransform2D,
 };
 use glam::{Quat, Vec2, Vec3};
 use std::{
@@ -261,7 +261,7 @@ fn render_case(
     let glyph_ramp = GlyphRamp::from_config(&config);
     let mut frame = FrameBuffers::new(88, 50);
     let mut scratch = RenderScratch::default();
-    let mut gpu_renderer_state = crate::render::backend_gpu::GpuRendererState::default();
+    let mut gpu_renderer_state = crate::render::backend::GpuRendererState::default();
 
     let mut frame_pipeline = FramePipeline::new(scene);
     frame_pipeline.prepare_frame(scene, 0.0, None, None, 0.0);
@@ -470,5 +470,5 @@ fn gpu_ascii_output_not_catastrophically_collapsed() {
     assert!(metrics.glyph_mismatch_ratio < 0.80);
 }
 
-#[path = "backend_tests/joint_limits.rs"]
+#[path = "tests/joint_limits.rs"]
 mod joint_limits;

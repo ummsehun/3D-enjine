@@ -2,16 +2,16 @@
 
 use glam::{Vec2, Vec3};
 
-use crate::render::background::theme_palette;
+use crate::render::common::glyph::{glyph_for_intensity, select_charset};
+use crate::render::common::material::sample_material;
+use crate::render::common::metrics::visible_cell_ratio;
+use crate::render::common::texture::{prefer_sampling_for_focus, select_mip_level};
+use crate::render::cpu::background::theme_palette;
 use crate::render::renderer::braille::{braille_thresholds, compose_braille_cells};
 use crate::render::renderer::shading::contrast_params;
 use crate::render::renderer::{
-    BrailleSubpixelBuffers, FrameBuffers, GlyphRamp, encode_ansi_frame, exposure_bias_multiplier,
+    encode_ansi_frame, exposure_bias_multiplier, BrailleSubpixelBuffers, FrameBuffers, GlyphRamp,
 };
-use crate::render::renderer_glyph::{glyph_for_intensity, select_charset};
-use crate::render::renderer_material::sample_material;
-use crate::render::renderer_metrics::visible_cell_ratio;
-use crate::render::renderer_texture::{prefer_sampling_for_focus, select_mip_level};
 use crate::scene::{
     AnsiQuantization, BrailleProfile, CameraFocusMode, CellAspectMode, ColorMode,
     MaterialAlphaMode, MaterialCpu, MaterialToonSource, RenderConfig, RenderMode,

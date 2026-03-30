@@ -1,6 +1,6 @@
 use crate::scene::ClarityProfile;
 
-pub(super) fn push_histogram(histogram: &mut [u32; 64], count: &mut u32, value: f32) {
+pub(crate) fn push_histogram(histogram: &mut [u32; 64], count: &mut u32, value: f32) {
     let v = value.clamp(0.0, 1.0);
     let idx = ((v * ((histogram.len() - 1) as f32)).round() as usize).min(histogram.len() - 1);
     histogram[idx] = histogram[idx].saturating_add(1);
@@ -22,7 +22,7 @@ pub(super) fn percentile_from_histogram(histogram: &[u32; 64], count: u32, q: f3
     1.0
 }
 
-pub(super) fn update_exposure_from_histogram(
+pub(crate) fn update_exposure_from_histogram(
     exposure: &mut f32,
     histogram: &[u32; 64],
     count: u32,
@@ -41,7 +41,7 @@ pub(super) fn update_exposure_from_histogram(
     *exposure = (*exposure + (target - *exposure) * 0.14).clamp(0.28, 3.8);
 }
 
-pub(super) fn tone_map_intensity(raw: f32, floor: f32, gamma: f32, exposure: f32) -> f32 {
+pub(crate) fn tone_map_intensity(raw: f32, floor: f32, gamma: f32, exposure: f32) -> f32 {
     let boosted = (raw.clamp(0.0, 1.0) * exposure).clamp(0.0, 1.4);
     let mapped = floor + (1.0 - floor) * boosted.clamp(0.0, 1.0).powf(gamma);
     mapped.clamp(0.0, 1.0)

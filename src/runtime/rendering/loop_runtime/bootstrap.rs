@@ -91,7 +91,7 @@ pub(super) struct BootstrapState {
     pub(super) last_render_stats: RenderStats,
     pub(super) effective_aspect_state: f32,
     pub(super) freefly_state: crate::scene::FreeFlyState,
-    pub(super) gpu_renderer_state: crate::render::backend_gpu::GpuRendererState,
+    pub(super) gpu_renderer_state: crate::render::backend::GpuRendererState,
     pub(super) io_failure_count: u8,
     pub(super) ghostty_zoom_repaint_due: Option<Instant>,
     pub(super) kitty_internal_res_base: crate::scene::KittyInternalResPreset,
@@ -195,7 +195,7 @@ pub(super) fn bootstrap_runtime(
     let center_lock_enabled = config.center_lock;
     let center_lock_mode = config.center_lock_mode;
     let stage_level = config.stage_level.min(4);
-    let gpu_renderer_state = crate::render::backend_gpu::GpuRendererState::default();
+    let gpu_renderer_state = crate::render::backend::GpuRendererState::default();
     let requested_color_mode =
         resolve_effective_color_mode(config.mode, config.color_mode, config.ascii_force_color);
     let ascii_force_color_active = config.ascii_force_color;

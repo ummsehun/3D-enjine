@@ -3,7 +3,12 @@ use glam::Mat4;
 use crate::renderer::{Camera, FrameBuffers, GlyphRamp, RenderScratch, RenderStats};
 use crate::scene::{RenderBackend, RenderConfig, SceneCpu};
 
-use super::{backend_cpu, backend_gpu};
+mod cpu;
+mod gpu;
+
+pub use gpu::{GpuBackendError, GpuRendererState};
+
+use self::{cpu as backend_cpu, gpu as backend_gpu};
 
 pub fn render_frame_with_backend(
     gpu_renderer_state: &mut backend_gpu::GpuRendererState,
@@ -71,5 +76,4 @@ pub fn render_frame_with_backend(
 }
 
 #[cfg(all(test, feature = "gpu"))]
-#[path = "backend_tests.rs"]
 mod tests;

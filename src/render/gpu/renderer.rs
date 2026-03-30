@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use glam::{Mat3, Mat4};
 
-use crate::render::backend_gpu::GpuRendererState;
+use crate::render::backend::GpuRendererState;
 use crate::renderer::{
     Camera, FrameBuffers, GlyphRamp, PixelFrame, RenderScratch, RenderStats,
     exposure_bias_multiplier,

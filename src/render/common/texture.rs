@@ -4,7 +4,7 @@ use crate::scene::{
     CameraFocusMode, TextureCpu, TextureSamplingMode, TextureVOrigin, TextureWrapMode,
 };
 
-pub(super) fn apply_uv_transform(uv: Vec2, transform: crate::scene::UvTransform2D) -> Vec2 {
+pub(crate) fn apply_uv_transform(uv: Vec2, transform: crate::scene::UvTransform2D) -> Vec2 {
     let scaled = Vec2::new(uv.x * transform.scale[0], uv.y * transform.scale[1]);
     let (sin_t, cos_t) = transform.rotation_rad.sin_cos();
     let rotated = Vec2::new(
@@ -17,7 +17,7 @@ pub(super) fn apply_uv_transform(uv: Vec2, transform: crate::scene::UvTransform2
     )
 }
 
-pub(super) fn sample_texture_rgba(
+pub(crate) fn sample_texture_rgba(
     texture: &TextureCpu,
     uv: Vec2,
     mode: TextureSamplingMode,
@@ -43,7 +43,7 @@ pub(super) fn sample_texture_rgba(
     }
 }
 
-pub(super) fn sample_texture_nearest(
+pub(crate) fn sample_texture_nearest(
     width: u32,
     height: u32,
     rgba8: &[u8],
@@ -58,7 +58,7 @@ pub(super) fn sample_texture_nearest(
     sample_texture_texel(width, height, rgba8, x, y)
 }
 
-pub(super) fn sample_texture_bilinear(
+pub(crate) fn sample_texture_bilinear(
     width: u32,
     height: u32,
     rgba8: &[u8],
@@ -112,7 +112,7 @@ pub(super) fn sample_texture_bilinear(
     ]
 }
 
-pub(super) fn sample_texture_texel(
+pub(crate) fn sample_texture_texel(
     width: u32,
     height: u32,
     rgba8: &[u8],
@@ -134,7 +134,7 @@ pub(super) fn sample_texture_texel(
     ]
 }
 
-pub(super) fn texture_level(texture: &TextureCpu, mip_level: usize) -> (u32, u32, &[u8]) {
+pub(crate) fn texture_level(texture: &TextureCpu, mip_level: usize) -> (u32, u32, &[u8]) {
     if mip_level == 0 {
         return (texture.width, texture.height, texture.rgba8.as_slice());
     }
@@ -147,7 +147,7 @@ pub(super) fn texture_level(texture: &TextureCpu, mip_level: usize) -> (u32, u32
     (texture.width, texture.height, texture.rgba8.as_slice())
 }
 
-pub(super) fn prefer_sampling_for_focus(
+pub(crate) fn prefer_sampling_for_focus(
     mode: TextureSamplingMode,
     focus: CameraFocusMode,
 ) -> TextureSamplingMode {
@@ -160,7 +160,7 @@ pub(super) fn prefer_sampling_for_focus(
     }
 }
 
-pub(super) fn select_mip_level(
+pub(crate) fn select_mip_level(
     texture: &TextureCpu,
     depth: f32,
     mip_bias: f32,
@@ -180,19 +180,23 @@ pub(super) fn select_mip_level(
     lod.floor() as usize
 }
 
-pub(super) fn wrap_uv(value: f32, mode: TextureWrapMode) -> f32 {
+pub(crate) fn wrap_uv(value: f32, mode: TextureWrapMode) -> f32 {
     match mode {
         TextureWrapMode::Repeat => value - value.floor(),
         TextureWrapMode::MirroredRepeat => {
             let whole = value.floor() as i32;
             let frac = value - value.floor();
-            if whole & 1 == 0 { frac } else { 1.0 - frac }
+            if whole & 1 == 0 {
+                frac
+            } else {
+                1.0 - frac
+            }
         }
         TextureWrapMode::ClampToEdge => value.clamp(0.0, 1.0 - 1.0e-6),
     }
 }
 
-pub(super) fn bilerp(c00: f32, c10: f32, c01: f32, c11: f32, tx: f32, ty: f32) -> f32 {
+pub(crate) fn bilerp(c00: f32, c10: f32, c01: f32, c11: f32, tx: f32, ty: f32) -> f32 {
     let a = c00 + (c10 - c00) * tx;
     let b = c01 + (c11 - c01) * tx;
     a + (b - a) * ty

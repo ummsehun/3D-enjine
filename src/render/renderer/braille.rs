@@ -59,7 +59,7 @@ pub fn compose_braille_cells(
     palette: ThemePalette,
     threshold: BrailleThresholds,
 ) {
-    use crate::render::renderer_color::model_color_for_intensity;
+    use crate::render::common::color::model_color_for_intensity;
 
     if frame.width == 0 || frame.height == 0 {
         return;

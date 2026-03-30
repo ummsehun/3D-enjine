@@ -15,6 +15,7 @@ use crate::scene::{
 mod cache;
 
 use super::{
+    constants::MAX_JOINTS,
     device::{GpuContext, GpuError},
     pipeline::GpuPipeline,
     pipeline::Uniforms,
@@ -177,10 +178,10 @@ impl GpuRenderer {
                     .or_insert_with(|| GpuMesh::new(&self.ctx, mesh))
             };
 
-            let mut joint_matrix_data = vec![0.0f32; 512 * 16];
+            let mut joint_matrix_data = vec![0.0f32; MAX_JOINTS * 16];
             if let Some(skin_idx) = instance.skin_index {
                 if let Some(joints) = skin_matrices.get(skin_idx) {
-                    for (i, mat) in joints.iter().take(512).enumerate() {
+                    for (i, mat) in joints.iter().take(MAX_JOINTS).enumerate() {
                         let offset = i * 16;
                         joint_matrix_data[offset..offset + 16]
                             .copy_from_slice(&mat.to_cols_array());

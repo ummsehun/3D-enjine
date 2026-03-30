@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
+use super::constants::MAX_JOINTS;
 use super::device::{GpuContext, GpuError};
 use wgpu::util::DeviceExt;
-
-const MAX_JOINTS: usize = 512;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]

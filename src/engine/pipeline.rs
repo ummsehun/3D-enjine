@@ -4,7 +4,6 @@ use crate::engine::pmx_rig::{
     apply_append_bone_transforms, apply_pmx_bone_axis_constraints, compute_bone_position,
     solve_ik_chain_ccd,
 };
-use crate::runtime::state::PmxPhysicsState;
 use crate::{animation::ChannelTarget, scene::NodePose};
 use crate::{
     animation::{
@@ -12,6 +11,16 @@ use crate::{
     },
     scene::SceneCpu,
 };
+
+pub(crate) trait PhysicsStepper {
+    fn step_physics(
+        &mut self,
+        scene: &SceneCpu,
+        poses: &mut [NodePose],
+        pre_physics_globals: &[Mat4],
+        dt: f32,
+    );
+}
 
 pub struct FramePipeline {
     poses: Vec<NodePose>,
@@ -43,7 +52,7 @@ impl FramePipeline {
         scene: &SceneCpu,
         elapsed_seconds: f32,
         anim_index: Option<usize>,
-        mut physics_state: Option<&mut PmxPhysicsState>,
+        mut physics_state: Option<&mut dyn PhysicsStepper>,
         physics_dt: f32,
     ) {
         reset_poses_from_nodes(&scene.nodes, &mut self.poses);
@@ -87,7 +96,7 @@ impl FramePipeline {
             &mut self.globals_visited,
         );
         if let Some(physics) = physics_state.as_deref_mut() {
-            physics.step(scene, &mut self.poses, &self.globals, physics_dt);
+            physics.step_physics(scene, &mut self.poses, &self.globals, physics_dt);
             apply_pmx_pose_stack(scene, &mut self.poses, true);
             compute_global_matrices_in_place(
                 &scene.nodes,
@@ -176,7 +185,10 @@ fn ik_chain_conflicts_with_physics(
         physics_meta.rigid_bodies.iter().any(|rigid| {
             rigid.bone_index >= 0
                 && rigid.bone_index as usize == link.bone_index
-                && !matches!(rigid.calc_method, crate::engine::pmx_rig::PmxRigidCalcMethod::Static)
+                && !matches!(
+                    rigid.calc_method,
+                    crate::engine::pmx_rig::PmxRigidCalcMethod::Static
+                )
         })
     })
 }
@@ -189,6 +201,7 @@ mod tests {
     use crate::animation::{AnimationChannel, AnimationClip, ChannelValues, Interpolation};
     use crate::assets::vmd_motion::parse_vmd_motion;
     use crate::loader;
+    use crate::runtime::state::PmxPhysicsState;
     use crate::scene::{MeshCpu, MeshInstance, MeshLayer, MorphTargetCpu, Node, SceneCpu};
     use glam::{Quat, Vec3};
 
@@ -345,9 +358,11 @@ mod tests {
         };
 
         let mut pipeline = FramePipeline::new(&scene);
-        let mut physics =
-            PmxPhysicsState::from_scene(&scene, crate::runtime::state::RuntimePmxSettings::default())
-                .expect("physics state");
+        let mut physics = PmxPhysicsState::from_scene(
+            &scene,
+            crate::runtime::state::RuntimePmxSettings::default(),
+        )
+        .expect("physics state");
         pipeline.prepare_frame(&scene, 0.0, None, Some(&mut physics), 0.2);
 
         let root_y = pipeline.globals()[0].transform_point3(Vec3::ZERO).y;
@@ -434,17 +449,25 @@ mod tests {
         let animation_index = scene.animations.len().checked_sub(1);
 
         let mut pipeline = FramePipeline::new(&scene);
-        let mut physics =
-            PmxPhysicsState::from_scene(&scene, crate::runtime::state::RuntimePmxSettings::default())
-                .expect("physics state");
+        let mut physics = PmxPhysicsState::from_scene(
+            &scene,
+            crate::runtime::state::RuntimePmxSettings::default(),
+        )
+        .expect("physics state");
 
         for sample_time in [0.0_f32, 1.0 / 60.0, 0.5, 1.0] {
-            pipeline.prepare_frame(&scene, sample_time, animation_index, Some(&mut physics), 1.0 / 60.0);
+            pipeline.prepare_frame(
+                &scene,
+                sample_time,
+                animation_index,
+                Some(&mut physics),
+                1.0 / 60.0,
+            );
             assert!(
-                pipeline.globals().iter().all(|matrix| matrix
-                    .to_cols_array()
+                pipeline
+                    .globals()
                     .iter()
-                    .all(|value| value.is_finite())),
+                    .all(|matrix| matrix.to_cols_array().iter().all(|value| value.is_finite())),
                 "non-finite matrix detected at sample_time={sample_time}"
             );
         }
@@ -489,9 +512,11 @@ mod tests {
         );
         debug_rabbit_focus("pre_physics", &scene, &pre_physics_globals);
 
-        let mut physics =
-            PmxPhysicsState::from_scene(&scene, crate::runtime::state::RuntimePmxSettings::default())
-                .expect("physics state");
+        let mut physics = PmxPhysicsState::from_scene(
+            &scene,
+            crate::runtime::state::RuntimePmxSettings::default(),
+        )
+        .expect("physics state");
         physics.step(&scene, &mut poses, &pre_physics_globals, 1.0 / 60.0);
 
         let mut post_physics_globals = Vec::new();

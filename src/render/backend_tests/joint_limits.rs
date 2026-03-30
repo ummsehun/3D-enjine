@@ -1,4 +1,9 @@
 use super::*;
+#[cfg(feature = "gpu")]
+use crate::render::gpu::constants::MAX_JOINTS;
+
+#[cfg(not(feature = "gpu"))]
+const MAX_JOINTS: usize = 512;
 
 #[test]
 fn supported_glb_joint_counts_fit_gpu_limit() {
@@ -17,16 +22,16 @@ fn supported_glb_joint_counts_fit_gpu_limit() {
             .map(|skin| skin.joints.len())
             .max()
             .unwrap_or(0);
-        if max_joints > 512 {
+        if max_joints > MAX_JOINTS {
             eprintln!(
-                "warning: skipping {} because it exceeds the GPU joint limit ({max_joints} > 512)",
+                "warning: skipping {} because it exceeds the GPU joint limit ({max_joints} > {MAX_JOINTS})",
                 path.display()
             );
             continue;
         }
         checked_any = true;
         assert!(
-            max_joints <= 512,
+            max_joints <= MAX_JOINTS,
             "{} exceeds GPU joint limit",
             path.display()
         );

@@ -7,8 +7,8 @@ use crate::engine::{
 use crate::scene::SceneCpu;
 
 use super::{
-    derive_pmx_profile, helpers::shape_bounding_radius, JointRuntime, JointRuntimeKind,
-    PmxPhysicsState, RigidBodyRuntime, RuntimePmxSettings,
+    JointRuntime, JointRuntimeKind, PmxPhysicsState, RigidBodyRuntime, RuntimePmxSettings,
+    derive_pmx_profile, helpers::shape_bounding_radius,
 };
 
 pub(super) fn from_scene(

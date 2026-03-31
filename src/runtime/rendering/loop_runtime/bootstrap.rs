@@ -15,17 +15,17 @@ use crate::{
         audio_sync::{AudioSyncRuntime, LoadedCameraTrack},
         graphics_proto::detect_supported_protocol,
         interaction::{freefly_state_from_camera, max_scene_vertices, orbit_camera},
-        options::{resolve_effective_color_mode, RuntimeSyncProfileContext},
+        options::{RuntimeSyncProfileContext, resolve_effective_color_mode},
         scene_analysis::compute_scene_framing,
         state::{
+            ColorRecoveryState, ContinuousSyncState, ExposureAutoBoost, HYBRID_GRAPHICS_MAX_CELLS,
+            RuntimeAdaptiveQuality, RuntimeCameraSettings, RuntimeCameraState,
+            RuntimeContrastPreset, RuntimePmxSettings, SYNC_OFFSET_LIMIT_MS, ScreenFitController,
             cap_render_size, normalize_graphics_settings, resolve_runtime_backend,
-            ColorRecoveryState, ContinuousSyncState, ExposureAutoBoost, RuntimeAdaptiveQuality,
-            RuntimeCameraSettings, RuntimeCameraState, RuntimeContrastPreset, RuntimePmxSettings,
-            ScreenFitController, HYBRID_GRAPHICS_MAX_CELLS, SYNC_OFFSET_LIMIT_MS,
         },
     },
     scene::{
-        resolve_cell_aspect, CameraControlMode, RenderConfig, RenderOutputMode, SceneCpu, StageRole,
+        CameraControlMode, RenderConfig, RenderOutputMode, SceneCpu, StageRole, resolve_cell_aspect,
     },
     terminal::{PresentMode, TerminalProfile, TerminalSession},
 };

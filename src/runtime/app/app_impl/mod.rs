@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::{
     assets::vmd_motion::parse_vmd_motion,
@@ -28,9 +28,9 @@ use crate::{
         preprocess::run_preprocess,
         render_loop::run_scene_interactive,
         start_ui::StageStatus,
-        state::{resolve_runtime_backend, RuntimeCameraSettings},
+        state::{RuntimeCameraSettings, resolve_runtime_backend},
     },
-    scene::{resolve_cell_aspect, CellAspectMode},
+    scene::{CellAspectMode, resolve_cell_aspect},
 };
 
 mod common;

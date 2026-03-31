@@ -8,10 +8,10 @@ use crate::scene::{MeshLayer, RenderConfig, RenderMode, SceneCpu, StageRole};
 use super::braille::{braille_thresholds, compose_braille_cells, update_safe_visibility_state};
 use super::projection::project_root_screen;
 use super::rasterization::{rasterize_braille_mesh, rasterize_mesh};
-use super::shading::{contrast_params, ShadingParams};
+use super::shading::{ShadingParams, contrast_params};
 use super::{Camera, FrameBuffers, RasterPass, RenderScratch, RenderStats};
 use crate::render::common::exposure::{exposure_bias_multiplier, update_exposure_from_histogram};
-use crate::render::common::glyph::{select_charset, GlyphRamp};
+use crate::render::common::glyph::{GlyphRamp, select_charset};
 use crate::render::common::metrics::apply_visible_metrics;
 use crate::render::cpu::background::{
     fill_background_ascii, fill_background_braille, stage_params, theme_palette,

@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::{
     assets::vmd_motion::parse_vmd_motion,
@@ -14,15 +14,15 @@ use crate::{
         audio_sync::prepare_audio_sync,
         config::GasciiConfig,
         options::{
-            default_color_mode_for_mode, resolve_effective_camera_mode,
-            resolve_effective_color_mode, resolve_pmx_settings_for_start,
-            resolve_sync_options_for_start, resolve_sync_profile_for_assets,
-            resolve_sync_profile_options_for_start, resolve_visual_options_for_start,
-            ResolvedSyncOptions, ResolvedVisualOptions,
+            ResolvedSyncOptions, ResolvedVisualOptions, default_color_mode_for_mode,
+            resolve_effective_camera_mode, resolve_effective_color_mode,
+            resolve_pmx_settings_for_start, resolve_sync_options_for_start,
+            resolve_sync_profile_for_assets, resolve_sync_profile_options_for_start,
+            resolve_visual_options_for_start,
         },
         pmx_log,
         render_loop::run_scene_interactive,
-        start_ui::{run_start_wizard, StageStatus, StartWizardDefaults},
+        start_ui::{StageStatus, StartWizardDefaults, run_start_wizard},
         state::RuntimeCameraSettings,
     },
     scene::RenderMode,

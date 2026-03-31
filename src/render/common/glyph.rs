@@ -1,4 +1,4 @@
-use crate::scene::{ContrastProfile, RenderConfig, RenderMode, DEFAULT_CHARSET};
+use crate::scene::{ContrastProfile, DEFAULT_CHARSET, RenderConfig, RenderMode};
 
 const BRAILLE_RAMP: &str = "⠀⠂⠆⠖⠶⠷⠿⡿⣿";
 const ADAPTIVE_ASCII_LOW: [char; 9] = [' ', '.', ':', '=', '+', '*', '#', '%', '@'];
@@ -70,11 +70,7 @@ pub(crate) fn glyph_intensity(glyph: char, charset: &[char]) -> f32 {
         let denom = charset.len().saturating_sub(1).max(1) as f32;
         return (index as f32 / denom).clamp(0.0, 1.0);
     }
-    if glyph == ' ' {
-        0.0
-    } else {
-        1.0
-    }
+    if glyph == ' ' { 0.0 } else { 1.0 }
 }
 
 pub(crate) fn select_charset<'a>(

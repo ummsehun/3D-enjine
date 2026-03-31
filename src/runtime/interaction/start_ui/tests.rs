@@ -1,7 +1,7 @@
 use super::*;
-use crate::runtime::start_ui_helpers::breakpoint_for;
+use crate::runtime::start_ui_helpers::{QUICK_RENDER_FIELD_COUNT, breakpoint_for};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{Terminal, backend::TestBackend};
 
 fn key(code: KeyCode) -> StartWizardEvent {
     StartWizardEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -195,16 +195,32 @@ fn music_step_esc_returns_to_motion_for_pmx_branch() {
 }
 
 #[test]
-fn tab_and_backtab_handle_focus_on_render_step() {
+fn tab_and_backtab_toggle_render_detail_mode() {
     let mut state = test_state();
     state.step = StartWizardStep::Render;
     state.render_focus_index = 0;
+    assert!(matches!(state.render_detail_mode, RenderDetailMode::Quick));
 
     state.apply_event(key(KeyCode::Tab));
-    assert_eq!(state.render_focus_index, 1);
+    assert!(matches!(
+        state.render_detail_mode,
+        RenderDetailMode::Advanced
+    ));
 
     state.apply_event(key(KeyCode::BackTab));
-    assert_eq!(state.render_focus_index, 0);
+    assert!(matches!(state.render_detail_mode, RenderDetailMode::Quick));
+}
+
+#[test]
+fn render_detail_toggle_clamps_focus_index_for_quick_mode() {
+    let mut state = test_state();
+    state.step = StartWizardStep::Render;
+    state.render_detail_mode = RenderDetailMode::Advanced;
+    state.render_focus_index = 30;
+
+    state.apply_event(key(KeyCode::Tab));
+    assert!(matches!(state.render_detail_mode, RenderDetailMode::Quick));
+    assert_eq!(state.render_focus_index, QUICK_RENDER_FIELD_COUNT - 1);
 }
 
 #[test]
@@ -257,4 +273,31 @@ fn render_wide_normal_compact() {
             })
             .expect("render should succeed");
     }
+}
+
+#[test]
+fn confirm_context_renders_with_stage_warning() {
+    let backend = TestBackend::new(120, 35);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut state = test_state();
+    state.step = StartWizardStep::Confirm;
+    state.stage_index = 1;
+    state.stage_entries[0].status = StageStatus::NeedsConvert;
+
+    terminal
+        .draw(|frame| {
+            draw_summary_panel(
+                frame,
+                Rect::new(0, 0, 50, 25),
+                Path::new("assets/glb"),
+                Path::new("assets/pmx"),
+                Path::new("assets/vmd"),
+                Path::new("assets/music"),
+                Path::new("assets/stage"),
+                Path::new("assets/camera"),
+                &state,
+                UiLanguage::Ko,
+            );
+        })
+        .expect("summary context render should succeed");
 }

@@ -1,21 +1,22 @@
 use std::{collections::HashMap, fs, path::Path, path::PathBuf};
 
 use crate::scene::{
-    resolve_cell_aspect, AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset,
-    CameraControlMode, CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode,
-    CinematicCameraMode, ClarityProfile, ColorMode, ContrastProfile, DetailProfile,
-    GraphicsProtocol, PerfProfile, RenderBackend, RenderConfig, RenderMode, RenderOutputMode,
-    SyncPolicy, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
+    AnsiQuantization, AudioReactiveMode, BrailleProfile, CameraAlignPreset, CameraControlMode,
+    CameraFocusMode, CameraMode, CellAspectMode, CenterLockMode, CinematicCameraMode,
+    ClarityProfile, ColorMode, ContrastProfile, DetailProfile, GraphicsProtocol, PerfProfile,
+    RenderBackend, RenderConfig, RenderMode, RenderOutputMode, SyncPolicy, SyncSpeedMode,
+    TextureSamplingMode, ThemeStyle, resolve_cell_aspect,
 };
 
 use crate::runtime::start_ui_helpers::{
-    breakpoint_for, closest_u32_index, compute_duration_fit_factor, detect_terminal_cell_aspect,
-    format_mib, inspect_audio_duration, inspect_clip_duration, inspect_motion_duration, MIN_HEIGHT,
-    MIN_WIDTH, START_FPS_OPTIONS, SYNC_OFFSET_LIMIT_MS,
+    MIN_HEIGHT, MIN_WIDTH, START_FPS_OPTIONS, SYNC_OFFSET_LIMIT_MS, breakpoint_for,
+    closest_u32_index, compute_duration_fit_factor, detect_terminal_cell_aspect, format_mib,
+    inspect_audio_duration, inspect_clip_duration, inspect_motion_duration,
 };
 
 use super::types::{
-    ModelBranch, StageChoice, StartSelection, StartWizardDefaults, StartWizardStep, UiBreakpoint,
+    ModelBranch, RenderDetailMode, StageChoice, StartSelection, StartWizardDefaults,
+    StartWizardStep, UiBreakpoint,
 };
 
 #[derive(Debug, Clone)]
@@ -102,6 +103,7 @@ pub(super) struct StartWizardState {
     pub(super) camera_unit_scale: f32,
     pub(super) camera_focus_index: usize,
     pub(super) render_focus_index: usize,
+    pub(super) render_detail_mode: RenderDetailMode,
     pub(super) width: u16,
     pub(super) height: u16,
     pub(super) detected_cell_aspect: Option<f32>,
@@ -191,6 +193,7 @@ impl StartWizardState {
             camera_unit_scale: defaults.camera_unit_scale.clamp(0.01, 2.0),
             camera_focus_index: 0,
             render_focus_index: 0,
+            render_detail_mode: RenderDetailMode::Quick,
             width,
             height,
             detected_cell_aspect: None,

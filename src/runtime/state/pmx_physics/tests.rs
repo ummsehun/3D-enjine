@@ -7,7 +7,7 @@ use crate::engine::skeleton::compute_global_matrices_in_place;
 use crate::runtime::state::RuntimePmxSettings;
 use crate::scene::{Node, NodePose, SceneCpu};
 
-use super::{helpers, PmxPhysicsState, RigidBodyRuntime};
+use super::{PmxPhysicsState, RigidBodyRuntime, helpers};
 
 fn single_root_scene(rigid_bodies: Vec<PmxRigidBodyCpu>) -> SceneCpu {
     SceneCpu {

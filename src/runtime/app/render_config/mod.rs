@@ -2,7 +2,7 @@ use crate::{
     runtime::{
         cli::{RunArgs, StartArgs},
         options::{
-            default_color_mode_for_mode, resolve_effective_color_mode, ResolvedVisualOptions,
+            ResolvedVisualOptions, default_color_mode_for_mode, resolve_effective_color_mode,
         },
     },
     scene::{RenderConfig, RenderMode, StageRole, SyncPolicy},

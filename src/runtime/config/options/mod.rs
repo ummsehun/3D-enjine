@@ -13,8 +13,8 @@ use crate::{
         config::GasciiConfig,
         state::RuntimePmxSettings,
         sync_profile::{
-            build_profile_key, default_profile_store_path, SyncProfileEntry, SyncProfileMode,
-            SyncProfileStore,
+            SyncProfileEntry, SyncProfileMode, SyncProfileStore, build_profile_key,
+            default_profile_store_path,
         },
     },
     scene::{

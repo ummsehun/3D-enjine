@@ -7,7 +7,7 @@ use rodio::{Decoder, Source};
 use crate::{
     loader,
     runtime::config::UiLanguage,
-    scene::{estimate_cell_aspect_from_window, PerfProfile, SyncSpeedMode},
+    scene::{estimate_cell_aspect_from_window, SyncSpeedMode},
 };
 
 pub(crate) use crate::shared::constants::{SYNC_OFFSET_LIMIT_MS, SYNC_OFFSET_STEP_MS};
@@ -18,6 +18,7 @@ pub(crate) const MIN_WIDTH: u16 = 60;
 pub(crate) const MIN_HEIGHT: u16 = 18;
 pub(crate) const START_FPS_OPTIONS: [u32; 9] = [0, 15, 20, 24, 30, 40, 60, 90, 120];
 pub(crate) const RENDER_FIELD_COUNT: usize = 33;
+pub(crate) const QUICK_RENDER_FIELD_COUNT: usize = 12;
 pub(crate) const RATATUI_SAFE_MAX_CELLS: u32 = (u16::MAX as u32) - 1;
 
 pub(crate) fn clamp_ratatui_area(area: Rect) -> Rect {
@@ -37,14 +38,6 @@ pub(crate) fn clamp_ratatui_area(area: Rect) -> Rect {
         y: area.y,
         width: w,
         height: h,
-    }
-}
-
-pub(crate) fn target_fps_for_profile(profile: PerfProfile) -> f32 {
-    match profile {
-        PerfProfile::Balanced => 30.0,
-        PerfProfile::Cinematic => 20.0,
-        PerfProfile::Smooth => 45.0,
     }
 }
 

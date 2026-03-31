@@ -3,7 +3,7 @@ use glam::{Mat4, Vec3};
 use crate::engine::pmx_rig::PmxRigidCalcMethod;
 use crate::scene::{NodePose, SceneCpu};
 
-use super::{helpers, PmxPhysicsState};
+use super::{PmxPhysicsState, helpers};
 
 pub(super) fn step(
     state: &mut PmxPhysicsState,

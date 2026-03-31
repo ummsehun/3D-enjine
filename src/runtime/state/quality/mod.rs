@@ -6,7 +6,7 @@ mod visibility;
 
 pub(crate) use adaptive::RuntimeAdaptiveQuality;
 pub(crate) use camera::{
-    dynamic_clip_planes, CenterLockState, DistanceClampGuard, ScreenFitController,
+    CenterLockState, DistanceClampGuard, ScreenFitController, dynamic_clip_planes,
 };
 pub(crate) use contrast::apply_runtime_contrast_preset;
 pub(crate) use limits::*;

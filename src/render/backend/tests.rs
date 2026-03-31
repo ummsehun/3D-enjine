@@ -3,9 +3,9 @@ use crate::pipeline::FramePipeline;
 use crate::render::gpu::GpuRenderer;
 use crate::renderer::{Camera, FrameBuffers, GlyphRamp, RenderScratch};
 use crate::scene::{
-    cube_scene, MaterialAlphaMode, MaterialCpu, MeshCpu, MeshInstance, MeshLayer, MorphTargetCpu,
-    Node, RenderConfig, SkinCpu, TextureColorSpace, TextureCpu, TextureFilterMode,
-    TextureSamplerMode, TextureSamplingMode, TextureVOrigin, TextureWrapMode, UvTransform2D,
+    MaterialAlphaMode, MaterialCpu, MeshCpu, MeshInstance, MeshLayer, MorphTargetCpu, Node,
+    RenderConfig, SkinCpu, TextureColorSpace, TextureCpu, TextureFilterMode, TextureSamplerMode,
+    TextureSamplingMode, TextureVOrigin, TextureWrapMode, UvTransform2D, cube_scene,
 };
 use glam::{Quat, Vec2, Vec3};
 use std::{

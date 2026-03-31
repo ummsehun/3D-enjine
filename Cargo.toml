@@ -27,3 +27,17 @@ encoding_rs = "0.8"
 
 [dev-dependencies]
 tempfile = "3.18.0"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

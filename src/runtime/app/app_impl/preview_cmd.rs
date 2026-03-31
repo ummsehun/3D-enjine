@@ -7,7 +7,7 @@ use crate::{
         options::RuntimeSyncProfileContext,
         preview::run_preview_server,
         sync_profile::{
-            build_profile_key, default_profile_store_path, SyncProfileMode, SyncProfileStore,
+            SyncProfileMode, SyncProfileStore, build_profile_key, default_profile_store_path,
         },
     },
 };

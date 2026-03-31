@@ -1,8 +1,9 @@
+use super::theme::start_ui_theme;
 use super::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 
-use super::confirm_panel::draw_confirm_panel;
 use super::panels::draw_aspect_calibration;
+use super::panels::draw_confirm_panel;
 use super::steps_render::draw_render_options;
 
 pub(super) fn draw_step_panel(
@@ -30,6 +31,7 @@ fn draw_branch_panel(
     state: &StartWizardState,
     ui_language: UiLanguage,
 ) {
+    let theme = start_ui_theme();
     let title = tr(ui_language, "0) 모델 종류 선택", "0) Select Source");
     let items = vec![
         ListItem::new(tr(ui_language, "GLB (.glb/.gltf)", "GLB (.glb/.gltf)")),
@@ -41,13 +43,15 @@ fn draw_branch_panel(
         ModelBranch::PmxVmd => 1,
     }));
     let list = List::new(items)
-        .block(Block::default().title(title).borders(Borders::ALL))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+        .style(theme.text_secondary)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(theme.border_active),
         )
-        .highlight_symbol("▶ ");
+        .highlight_style(theme.list_selected)
+        .highlight_symbol(theme.list_selected_symbol);
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
@@ -57,6 +61,7 @@ fn draw_model_list(
     state: &StartWizardState,
     ui_language: UiLanguage,
 ) {
+    let theme = start_ui_theme();
     let title = tr(ui_language, "1) 모델 선택", "1) Select Model");
     let entries = match state.branch {
         ModelBranch::Glb => &state.model_entries,
@@ -69,13 +74,15 @@ fn draw_model_list(
     let mut list_state = ListState::default();
     list_state.select(Some(state.model_index));
     let list = List::new(items)
-        .block(Block::default().title(title).borders(Borders::ALL))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+        .style(theme.text_secondary)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(theme.border_active),
         )
-        .highlight_symbol("▶ ");
+        .highlight_style(theme.list_selected)
+        .highlight_symbol(theme.list_selected_symbol);
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
@@ -85,6 +92,7 @@ fn draw_motion_list(
     state: &StartWizardState,
     ui_language: UiLanguage,
 ) {
+    let theme = start_ui_theme();
     let title = tr(ui_language, "2) 모션 선택", "2) Select Motion");
     let mut items = Vec::with_capacity(state.motion_entries.len() + 1);
     items.push(ListItem::new(tr(ui_language, "없음", "None")));
@@ -97,13 +105,15 @@ fn draw_motion_list(
     let mut list_state = ListState::default();
     list_state.select(Some(state.motion_index));
     let list = List::new(items)
-        .block(Block::default().title(title).borders(Borders::ALL))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+        .style(theme.text_secondary)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(theme.border_active),
         )
-        .highlight_symbol("▶ ");
+        .highlight_style(theme.list_selected)
+        .highlight_symbol(theme.list_selected_symbol);
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
@@ -113,6 +123,7 @@ fn draw_music_list(
     state: &StartWizardState,
     ui_language: UiLanguage,
 ) {
+    let theme = start_ui_theme();
     let title = tr(ui_language, "2) 음악 선택", "2) Select Music");
     let mut items = Vec::with_capacity(state.music_entries.len() + 1);
     items.push(ListItem::new(tr(ui_language, "없음", "None")));
@@ -125,13 +136,15 @@ fn draw_music_list(
     let mut list_state = ListState::default();
     list_state.select(Some(state.music_index));
     let list = List::new(items)
-        .block(Block::default().title(title).borders(Borders::ALL))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+        .style(theme.text_secondary)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(theme.border_active),
         )
-        .highlight_symbol("▶ ");
+        .highlight_style(theme.list_selected)
+        .highlight_symbol(theme.list_selected_symbol);
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
@@ -141,6 +154,7 @@ fn draw_stage_list(
     state: &StartWizardState,
     ui_language: UiLanguage,
 ) {
+    let theme = start_ui_theme();
     let title = tr(
         ui_language,
         "3) 스테이지를 선택해 주세요",
@@ -159,13 +173,15 @@ fn draw_stage_list(
     let mut list_state = ListState::default();
     list_state.select(Some(state.stage_index));
     let list = List::new(items)
-        .block(Block::default().title(title).borders(Borders::ALL))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+        .style(theme.text_secondary)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(theme.border_active),
         )
-        .highlight_symbol("▶ ");
+        .highlight_style(theme.list_selected)
+        .highlight_symbol(theme.list_selected_symbol);
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
@@ -175,6 +191,7 @@ fn draw_camera_panel(
     state: &StartWizardState,
     ui_language: UiLanguage,
 ) {
+    let theme = start_ui_theme();
     let title = tr(ui_language, "4) 카메라 선택", "4) Select Camera");
     let camera_source = if state.camera_index == 0 {
         tr(ui_language, "없음", "None").to_owned()
@@ -217,12 +234,14 @@ fn draw_camera_panel(
     let mut list_state = ListState::default();
     list_state.select(Some(state.camera_focus_index.min(3)));
     let list = List::new(items)
-        .block(Block::default().title(title).borders(Borders::ALL))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+        .style(theme.text_secondary)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(theme.border_active),
         )
-        .highlight_symbol("▶ ");
+        .highlight_style(theme.list_selected)
+        .highlight_symbol(theme.list_selected_symbol);
     frame.render_stateful_widget(list, area, &mut list_state);
 }

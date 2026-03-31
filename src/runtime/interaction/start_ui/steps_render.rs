@@ -1,3 +1,4 @@
+use super::theme::start_ui_theme;
 use super::*;
 use crate::runtime::start_ui_helpers::fps_label;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
@@ -8,7 +9,16 @@ pub(super) fn draw_render_options(
     state: &StartWizardState,
     ui_language: UiLanguage,
 ) {
-    let title = tr(ui_language, "4) 렌더 옵션", "4) Render Options");
+    let theme = start_ui_theme();
+    let mode_tag = match state.render_detail_mode {
+        RenderDetailMode::Quick => tr(ui_language, "Quick", "Quick"),
+        RenderDetailMode::Advanced => tr(ui_language, "Advanced", "Advanced"),
+    };
+    let title = format!(
+        "{} [{}]",
+        tr(ui_language, "4) 렌더 옵션", "4) Render Options"),
+        mode_tag
+    );
     let mode = match state.mode {
         RenderMode::Ascii => "ASCII",
         RenderMode::Braille => "Braille",
@@ -63,7 +73,7 @@ pub(super) fn draw_render_options(
         BrailleProfile::Normal => tr(ui_language, "표준", "Normal"),
         BrailleProfile::Dense => tr(ui_language, "고밀도", "Dense"),
     };
-    let theme = match state.theme_style {
+    let theme_style = match state.theme_style {
         ThemeStyle::Theater => tr(ui_language, "극장", "Theater"),
         ThemeStyle::Neon => tr(ui_language, "네온", "Neon"),
         ThemeStyle::Holo => tr(ui_language, "홀로그램", "Hologram"),
@@ -136,7 +146,7 @@ pub(super) fn draw_render_options(
         TextureSamplingMode::Bilinear => tr(ui_language, "쌍선형", "Bilinear"),
     };
 
-    let rows = [
+    let rows = vec![
         format!("{}: {}", tr(ui_language, "모드", "Mode"), mode),
         format!(
             "{}: {}",
@@ -222,7 +232,7 @@ pub(super) fn draw_render_options(
         format!(
             "{}: {}",
             tr(ui_language, "분위기/조명 스타일", "Mood/Lighting"),
-            theme
+            theme_style
         ),
         format!(
             "{}: {}",
@@ -296,19 +306,30 @@ pub(super) fn draw_render_options(
         ),
     ];
 
-    let items = rows
+    let visible_rows = if matches!(state.render_detail_mode, RenderDetailMode::Quick) {
+        rows.iter()
+            .take(QUICK_RENDER_FIELD_COUNT)
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        rows
+    };
+
+    let items = visible_rows
         .iter()
         .map(|text| ListItem::new(text.clone()))
         .collect::<Vec<_>>();
     let mut list_state = ListState::default();
     list_state.select(Some(state.render_focus_index));
     let list = List::new(items)
-        .block(Block::default().title(title).borders(Borders::ALL))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+        .style(theme.text_secondary)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(theme.border_active),
         )
-        .highlight_symbol("▶ ");
+        .highlight_style(theme.list_selected)
+        .highlight_symbol(theme.list_selected_symbol);
     frame.render_stateful_widget(list, area, &mut list_state);
 }

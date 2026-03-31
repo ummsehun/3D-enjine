@@ -15,8 +15,8 @@ mod step;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use profile::derive_pmx_profile;
 use profile::PmxDerivedProfile;
+pub(crate) use profile::derive_pmx_profile;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PmxPhysicsState {

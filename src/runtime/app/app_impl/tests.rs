@@ -13,12 +13,12 @@ use crate::{
         scene_analysis::compute_scene_framing,
         start_ui::{StageChoice, StageTransform},
         state::{
-            apply_distant_subject_clarity_boost, apply_pmx_surface_guardrails, cap_render_size,
-            dynamic_clip_planes, is_terminal_size_unstable, CameraDirectorState, CenterLockState,
-            ContinuousSyncState, DistanceClampGuard, ExposureAutoBoost, OrbitState,
-            RuntimeAdaptiveQuality, RuntimeCameraState, ScreenFitController,
-            LOW_VIS_EXPOSURE_RECOVER_FRAMES, LOW_VIS_EXPOSURE_TRIGGER_FRAMES, MAX_RENDER_COLS,
-            MAX_RENDER_ROWS,
+            CameraDirectorState, CenterLockState, ContinuousSyncState, DistanceClampGuard,
+            ExposureAutoBoost, LOW_VIS_EXPOSURE_RECOVER_FRAMES, LOW_VIS_EXPOSURE_TRIGGER_FRAMES,
+            MAX_RENDER_COLS, MAX_RENDER_ROWS, OrbitState, RuntimeAdaptiveQuality,
+            RuntimeCameraState, ScreenFitController, apply_distant_subject_clarity_boost,
+            apply_pmx_surface_guardrails, cap_render_size, dynamic_clip_planes,
+            is_terminal_size_unstable,
         },
     },
     scene::{

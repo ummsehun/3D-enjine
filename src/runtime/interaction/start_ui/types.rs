@@ -29,6 +29,12 @@ pub enum StartWizardStep {
     Confirm,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderDetailMode {
+    Quick,
+    Advanced,
+}
+
 impl StartWizardStep {
     pub(super) fn index(self) -> usize {
         match self {

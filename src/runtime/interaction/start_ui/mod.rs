@@ -1,4 +1,3 @@
-mod confirm_panel;
 mod input;
 mod input_adjust;
 mod panels;
@@ -7,6 +6,7 @@ mod steps;
 mod steps_render;
 #[cfg(test)]
 mod tests;
+mod theme;
 mod types;
 
 use std::{
@@ -28,16 +28,16 @@ use ratatui::prelude::*;
 use crate::runtime::{
     config::UiLanguage,
     start_ui_helpers::{
-        clamp_ratatui_area, cycle_index, tr, RATATUI_SAFE_MAX_CELLS, RENDER_FIELD_COUNT,
-        START_FPS_OPTIONS, SYNC_OFFSET_LIMIT_MS, SYNC_OFFSET_STEP_MS,
+        QUICK_RENDER_FIELD_COUNT, RATATUI_SAFE_MAX_CELLS, RENDER_FIELD_COUNT, START_FPS_OPTIONS,
+        SYNC_OFFSET_LIMIT_MS, SYNC_OFFSET_STEP_MS, clamp_ratatui_area, cycle_index, tr,
     },
     terminal::{RatatuiSession, TerminalProfile},
 };
 
 use state::{StartEntry, StartWizardAction, StartWizardState};
 pub use types::{
-    ModelBranch, StageChoice, StageStatus, StageTransform, StartSelection, StartWizardDefaults,
-    StartWizardEvent, StartWizardStep, UiBreakpoint,
+    ModelBranch, RenderDetailMode, StageChoice, StageStatus, StageTransform, StartSelection,
+    StartWizardDefaults, StartWizardEvent, StartWizardStep, UiBreakpoint,
 };
 
 pub(crate) use crate::scene::{
@@ -48,7 +48,9 @@ pub(crate) use crate::scene::{
     ThemeStyle,
 };
 
-use panels::{draw_header, draw_help_panel, draw_min_size_screen, draw_summary_panel};
+use panels::{
+    draw_action_bar, draw_header, draw_min_size_screen, draw_stepper, draw_summary_panel,
+};
 use steps::draw_step_panel;
 
 pub fn run_start_wizard(
@@ -211,28 +213,35 @@ fn draw_start_wizard(
         return;
     }
     let breakpoint = state.breakpoint();
-    let footer_height = match breakpoint {
+    let action_height = match breakpoint {
         UiBreakpoint::Wide => 5,
         UiBreakpoint::Normal => 4,
         UiBreakpoint::Compact => 3,
+    };
+    let stepper_height = if matches!(breakpoint, UiBreakpoint::Compact) {
+        1
+    } else {
+        2
     };
     let main = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
+            Constraint::Length(stepper_height),
             Constraint::Min(8),
-            Constraint::Length(footer_height),
+            Constraint::Length(action_height),
         ])
         .split(area);
 
     draw_header(frame, main[0], state, ui_language);
+    draw_stepper(frame, main[1], state, ui_language, breakpoint);
 
     match breakpoint {
         UiBreakpoint::Wide => {
             let body = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-                .split(main[1]);
+                .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+                .split(main[2]);
             draw_step_panel(frame, body[0], state, ui_language);
             draw_summary_panel(
                 frame,
@@ -250,8 +259,8 @@ fn draw_start_wizard(
         UiBreakpoint::Normal => {
             let body = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(8), Constraint::Length(10)])
-                .split(main[1]);
+                .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+                .split(main[2]);
             draw_step_panel(frame, body[0], state, ui_language);
             draw_summary_panel(
                 frame,
@@ -267,9 +276,9 @@ fn draw_start_wizard(
             );
         }
         UiBreakpoint::Compact => {
-            draw_step_panel(frame, main[1], state, ui_language);
+            draw_step_panel(frame, main[2], state, ui_language);
         }
     }
 
-    draw_help_panel(frame, main[2], state, ui_language, breakpoint);
+    draw_action_bar(frame, main[3], state, ui_language, breakpoint);
 }

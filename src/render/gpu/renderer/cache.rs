@@ -3,7 +3,7 @@ use crate::scene::{
     TextureSamplerMode, TextureSamplingMode, TextureWrapMode,
 };
 
-use super::{GpuRenderer, GpuTexture};
+use super::{super::GpuTexture, GpuRenderer};
 
 #[derive(Clone, Copy)]
 pub(super) struct MaterialGpuParams {
@@ -39,7 +39,7 @@ impl Default for MaterialGpuParams {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct TextureBindingKey {
+pub(crate) struct TextureBindingKey {
     pub(super) texture_index: usize,
     pub(super) wrap_s: u8,
     pub(super) wrap_t: u8,
@@ -47,7 +47,7 @@ pub(super) struct TextureBindingKey {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct SceneSignature {
+pub(crate) struct SceneSignature {
     meshes_ptr: usize,
     materials_ptr: usize,
     textures_ptr: usize,

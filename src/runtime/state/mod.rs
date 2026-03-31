@@ -14,11 +14,11 @@ pub(crate) use models::{
     ReactiveState, RuntimeCameraSettings, RuntimeCameraState, RuntimeContrastPreset,
     RuntimeInputResult, RuntimePmxSettings,
 };
-pub(crate) use pmx_physics::{derive_pmx_profile, PmxPhysicsState};
+pub(crate) use pmx_physics::{PmxPhysicsState, derive_pmx_profile};
 pub(crate) use quality::{
-    apply_runtime_contrast_preset, dynamic_clip_planes, AutoRadiusGuard, CenterLockState,
-    DistanceClampGuard, ExposureAutoBoost, RuntimeAdaptiveQuality, ScreenFitController,
-    VisibilityWatchdog,
+    AutoRadiusGuard, CenterLockState, DistanceClampGuard, ExposureAutoBoost,
+    RuntimeAdaptiveQuality, ScreenFitController, VisibilityWatchdog, apply_runtime_contrast_preset,
+    dynamic_clip_planes,
 };
 #[allow(unused_imports)]
 pub(crate) use quality::{
@@ -31,9 +31,9 @@ pub(crate) use quality_tuning::{
     apply_adaptive_quality_tuning, apply_distant_subject_clarity_boost,
     apply_face_focus_detail_boost, apply_pmx_surface_guardrails, jitter_scale_for_lod,
 };
-pub(crate) use sizing::{cap_render_size, is_terminal_size_unstable};
 #[allow(unused_imports)]
 pub(crate) use sizing::{MAX_RENDER_COLS, MAX_RENDER_ROWS};
+pub(crate) use sizing::{cap_render_size, is_terminal_size_unstable};
 pub(crate) use status::{format_runtime_status, overlay_osd};
 pub(crate) const HYBRID_GRAPHICS_MAX_CELLS: usize = 24_000;
 pub(crate) const HYBRID_GRAPHICS_SLOW_FRAME_MS: f32 = 45.0;

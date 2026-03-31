@@ -10,7 +10,7 @@ use crate::render::cpu::background::theme_palette;
 use crate::render::renderer::braille::{braille_thresholds, compose_braille_cells};
 use crate::render::renderer::shading::contrast_params;
 use crate::render::renderer::{
-    encode_ansi_frame, exposure_bias_multiplier, BrailleSubpixelBuffers, FrameBuffers, GlyphRamp,
+    BrailleSubpixelBuffers, FrameBuffers, GlyphRamp, encode_ansi_frame, exposure_bias_multiplier,
 };
 use crate::scene::{
     AnsiQuantization, BrailleProfile, CameraFocusMode, CellAspectMode, ColorMode,

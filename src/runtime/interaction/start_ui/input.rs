@@ -30,11 +30,19 @@ impl StartWizardState {
 
         match key.code {
             KeyCode::Tab => {
-                self.tab_forward();
+                if matches!(self.step, StartWizardStep::Render) {
+                    self.toggle_render_detail_mode();
+                } else {
+                    self.tab_forward();
+                }
                 return StartWizardAction::Continue;
             }
             KeyCode::BackTab => {
-                self.tab_backward();
+                if matches!(self.step, StartWizardStep::Render) {
+                    self.toggle_render_detail_mode();
+                } else {
+                    self.tab_backward();
+                }
                 return StartWizardAction::Continue;
             }
             _ => {}
@@ -214,13 +222,14 @@ impl StartWizardState {
     }
 
     fn apply_render_key(&mut self, key: KeyEvent) -> StartWizardAction {
+        let render_field_count = self.current_render_field_count();
         match key.code {
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
-                cycle_index(&mut self.render_focus_index, RENDER_FIELD_COUNT, -1);
+                cycle_index(&mut self.render_focus_index, render_field_count, -1);
                 StartWizardAction::Continue
             }
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
-                cycle_index(&mut self.render_focus_index, RENDER_FIELD_COUNT, 1);
+                cycle_index(&mut self.render_focus_index, render_field_count, 1);
                 StartWizardAction::Continue
             }
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('H') => {
@@ -295,7 +304,7 @@ impl StartWizardState {
             StartWizardStep::Stage => self.step = StartWizardStep::Camera,
             StartWizardStep::Camera => self.step = StartWizardStep::Render,
             StartWizardStep::Render => {
-                if self.render_focus_index + 1 < RENDER_FIELD_COUNT {
+                if self.render_focus_index + 1 < self.current_render_field_count() {
                     self.render_focus_index += 1;
                 } else {
                     self.step = StartWizardStep::AspectCalib;
@@ -329,6 +338,25 @@ impl StartWizardState {
             }
             StartWizardStep::AspectCalib => self.step = StartWizardStep::Render,
             StartWizardStep::Confirm => self.step = StartWizardStep::AspectCalib,
+        }
+    }
+
+    fn current_render_field_count(&self) -> usize {
+        if matches!(self.render_detail_mode, RenderDetailMode::Quick) {
+            QUICK_RENDER_FIELD_COUNT
+        } else {
+            RENDER_FIELD_COUNT
+        }
+    }
+
+    fn toggle_render_detail_mode(&mut self) {
+        self.render_detail_mode = match self.render_detail_mode {
+            RenderDetailMode::Quick => RenderDetailMode::Advanced,
+            RenderDetailMode::Advanced => RenderDetailMode::Quick,
+        };
+        let count = self.current_render_field_count();
+        if self.render_focus_index >= count {
+            self.render_focus_index = count.saturating_sub(1);
         }
     }
 }

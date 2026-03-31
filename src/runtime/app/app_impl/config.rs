@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::{
     runtime::{
-        config::{load_gascii_config, GasciiConfig},
+        config::{GasciiConfig, load_gascii_config},
         options::RuntimeSyncProfileContext,
         sync_profile::{SyncProfileEntry, SyncProfileStore},
     },

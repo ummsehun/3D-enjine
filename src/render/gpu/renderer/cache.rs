@@ -3,7 +3,7 @@ use crate::scene::{
     TextureSamplerMode, TextureSamplingMode, TextureWrapMode,
 };
 
-use super::{super::GpuTexture, GpuRenderer};
+use super::{super::device::GpuError, super::GpuTexture, GpuRenderer};
 
 #[derive(Clone, Copy)]
 pub(super) struct MaterialGpuParams {
@@ -97,7 +97,7 @@ impl GpuRenderer {
         }
     }
 
-    pub(super) fn create_texture_bind_group(&self, texture: &GpuTexture) -> wgpu::BindGroup {
+    pub(super) fn create_texture_bind_group(&self, texture: &GpuTexture) -> Result<wgpu::BindGroup, GpuError> {
         self.create_texture_bind_group_with_sampler(texture, None)
     }
 
@@ -105,10 +105,11 @@ impl GpuRenderer {
         &self,
         texture: &GpuTexture,
         sampler: Option<&wgpu::Sampler>,
-    ) -> wgpu::BindGroup {
-        let pipeline = self.pipeline.as_ref().unwrap();
+    ) -> Result<wgpu::BindGroup, GpuError> {
+        let pipeline = self.pipeline.as_ref()
+            .ok_or_else(|| GpuError::Render("pipeline not initialized for bind group".to_string()))?;
         let sampler = sampler.unwrap_or(&texture.sampler);
-        self.ctx
+        Ok(self.ctx
             .device
             .create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("texture_bind_group"),
@@ -123,7 +124,7 @@ impl GpuRenderer {
                         resource: wgpu::BindingResource::Sampler(sampler),
                     },
                 ],
-            })
+            }))
     }
 
     fn wrap_mode_to_wgpu(mode: TextureWrapMode) -> wgpu::AddressMode {
@@ -178,7 +179,7 @@ impl GpuRenderer {
         }
     }
 
-    fn get_or_create_texture(&mut self, key: TextureBindingKey, texture: &TextureCpu) {
+    fn get_or_create_texture(&mut self, key: TextureBindingKey, texture: &TextureCpu) -> Result<(), GpuError> {
         if !self.texture_bind_groups.contains_key(&key) {
             if !self.texture_cache.contains_key(&key.texture_index) {
                 let gpu_texture = GpuTexture::new(
@@ -221,14 +222,15 @@ impl GpuRenderer {
                 ..Default::default()
             });
             let bind_group =
-                self.create_texture_bind_group_with_sampler(texture_ref, Some(&sampler));
+                self.create_texture_bind_group_with_sampler(texture_ref, Some(&sampler))?;
             self.texture_bind_groups.insert(key, bind_group);
         }
+        Ok(())
     }
 
-    pub(super) fn cache_textures_for_scene(&mut self, scene: &SceneCpu, config: &RenderConfig) {
+    pub(super) fn cache_textures_for_scene(&mut self, scene: &SceneCpu, config: &RenderConfig) -> Result<(), GpuError> {
         if !config.material_color {
-            return;
+            return Ok(());
         }
         for instance in &scene.mesh_instances {
             if let Some(mesh) = scene.meshes.get(instance.mesh_index) {
@@ -258,13 +260,14 @@ impl GpuRenderer {
                                         TextureSamplingMode::Bilinear => 1,
                                     },
                                 };
-                                self.get_or_create_texture(key, texture);
+                                self.get_or_create_texture(key, texture)?;
                             }
                         }
                     }
                 }
             }
         }
+        Ok(())
     }
 
     pub(super) fn get_material_params(

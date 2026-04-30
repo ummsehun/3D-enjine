@@ -9,3 +9,4 @@ assets-local/
 # Added by cargo
 
 /target
+/log

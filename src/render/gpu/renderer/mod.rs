@@ -38,12 +38,14 @@ impl GpuRenderer {
     ) -> Result<PixelFrame, GpuError> {
         self.ensure_pipeline()?;
         self.ensure_scene_cache(scene);
-        self.cache_textures_for_scene(scene, config);
+        self.cache_textures_for_scene(scene, config)?;
 
-        let pipeline = self.pipeline.as_ref().unwrap();
+        let pipeline = self.pipeline.as_ref()
+            .ok_or_else(|| GpuError::Render("pipeline not initialized".to_string()))?;
 
         // Reuse or create render target based on size
-        let needs_new_target = self.cached_render_target_size != Some((width, height));
+        let needs_new_target = self.cached_render_target_size != Some((width, height))
+            || self.cached_render_target.is_none();
         if needs_new_target {
             self.cached_render_target = Some(RenderTarget::new(
                 &self.ctx,
@@ -51,7 +53,8 @@ impl GpuRenderer {
             )?);
             self.cached_render_target_size = Some((width, height));
         }
-        let render_target = self.cached_render_target.as_ref().unwrap();
+        let render_target = self.cached_render_target.as_ref()
+            .ok_or_else(|| GpuError::Render("render target not available".to_string()))?;
 
         let aspect = (width as f32 * config.cell_aspect).max(1.0) / height as f32;
         let projection =

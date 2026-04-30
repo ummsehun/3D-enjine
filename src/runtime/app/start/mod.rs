@@ -1,36 +1,31 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 use crate::{
-    assets::vmd_motion::parse_vmd_motion,
-    cli::{RunSceneArg, StartArgs},
-    loader,
+    cli::StartArgs,
     runtime::{
-        app_render_config::render_config_from_start,
+        app::{load_runtime_config, resolve_animation_index},
         asset_discovery::{
-            apply_stage_transform, discover_camera_vmds, discover_glb_files, discover_music_files,
-            discover_pmx_files, discover_stage_sets, discover_vmd_files, load_scene_file,
-            merge_scenes, resolve_camera_vmd_choice, resolved_camera_dir, resolved_stage_dir,
+            discover_camera_vmds, discover_glb_files, discover_music_files, discover_pmx_files,
+            discover_stage_sets, discover_vmd_files, resolve_camera_vmd_choice, resolved_camera_dir,
+            resolved_stage_dir,
         },
-        audio_sync::prepare_audio_sync,
-        config::GasciiConfig,
         options::{
-            ResolvedSyncOptions, ResolvedVisualOptions, default_color_mode_for_mode,
-            resolve_effective_camera_mode, resolve_effective_color_mode,
+            default_color_mode_for_mode, resolve_effective_color_mode,
             resolve_pmx_settings_for_start, resolve_sync_options_for_start,
-            resolve_sync_profile_for_assets, resolve_sync_profile_options_for_start,
-            resolve_visual_options_for_start,
+            resolve_sync_profile_options_for_start, resolve_visual_options_for_start,
         },
         pmx_log,
         render_loop::run_scene_interactive,
-        start_ui::{StageStatus, StartWizardDefaults, run_start_wizard},
-        state::RuntimeCameraSettings,
+        start_ui::{StartWizardDefaults, run_start_wizard},
     },
     scene::RenderMode,
 };
 
-use crate::runtime::app::{
-    apply_runtime_render_tuning, load_runtime_config, resolve_animation_index,
-};
+mod font;
+mod model;
+mod render_config;
+mod stage;
+mod sync;
 
 pub(super) fn start(args: StartArgs) -> Result<()> {
     let runtime_cfg = load_runtime_config();
@@ -139,174 +134,10 @@ pub(super) fn start(args: StartArgs) -> Result<()> {
         return Ok(());
     };
     if selection.apply_font_preset {
-        apply_startup_font_config(&runtime_cfg);
+        font::apply_startup_font_config(&runtime_cfg);
     }
-    let mut scene = match selection.branch {
-        crate::runtime::start_ui::ModelBranch::Glb => loader::load_gltf(&selection.glb_path)?,
-        crate::runtime::start_ui::ModelBranch::PmxVmd => {
-            let pmx_path = selection
-                .pmx_path
-                .as_deref()
-                .context("PMX branch selected without pmx_path")?;
-            pmx_log::start_session("=== PMX+VMD import session start ===");
-            pmx_log::info(format!("PMX path: {}", pmx_path.display()));
-            if let Some(motion_vmd_path) = selection.motion_vmd_path.as_deref() {
-                pmx_log::info(format!("VMD path: {}", motion_vmd_path.display()));
-            } else {
-                pmx_log::warn("PMX branch selected without a VMD motion; model will load static.");
-            }
-
-            let mut scene = match loader::load_pmx(pmx_path) {
-                Ok(scene) => scene,
-                Err(err) => {
-                    pmx_log::error(format!("failed to load PMX {}: {err}", pmx_path.display()));
-                    return Err(err);
-                }
-            };
-            let morph_target_count = scene
-                .meshes
-                .iter()
-                .map(|mesh| mesh.morph_targets.len())
-                .sum::<usize>();
-            let (
-                bone_count,
-                bone_ik_count,
-                bone_append_count,
-                bone_fixed_axis_count,
-                bone_local_axis_count,
-                bone_external_parent_count,
-            ) = scene
-                .pmx_rig_meta
-                .as_ref()
-                .map(|meta| {
-                    (
-                        meta.bones.len(),
-                        meta.count_bones_with_ik(),
-                        meta.count_bones_with_append(),
-                        meta.count_bones_with_fixed_axis(),
-                        meta.count_bones_with_local_axis(),
-                        meta.count_bones_with_external_parent(),
-                    )
-                })
-                .unwrap_or((0, 0, 0, 0, 0, 0));
-            let ik_chain_count = scene
-                .pmx_rig_meta
-                .as_ref()
-                .map(|meta| meta.ik_chains.len())
-                .unwrap_or(0);
-            let rigid_body_count = scene
-                .pmx_physics_meta
-                .as_ref()
-                .map(|meta| meta.rigid_bodies.len())
-                .unwrap_or(0);
-            let joint_count = scene
-                .pmx_physics_meta
-                .as_ref()
-                .map(|meta| meta.joints.len())
-                .unwrap_or(0);
-            pmx_log::info(format!(
-                "PMX loaded: nodes={}, skins={}, meshes={}, vertices={}, triangles={}, morph_targets={}, material_morphs={}, ik_chains={}, rigid_bodies={}, joints={}",
-                scene.nodes.len(),
-                scene.skins.len(),
-                scene.meshes.len(),
-                scene.total_vertices(),
-                scene.total_triangles(),
-                morph_target_count,
-                scene.material_morphs.len(),
-                ik_chain_count,
-                rigid_body_count,
-                joint_count
-            ));
-            pmx_log::info(format!(
-                "PMX rig bones: total={}, ik={}, append={}, fixed_axis={}, local_axis={}, external_parent={}",
-                bone_count,
-                bone_ik_count,
-                bone_append_count,
-                bone_fixed_axis_count,
-                bone_local_axis_count,
-                bone_external_parent_count
-            ));
-            if let Some(motion_vmd_path) = selection.motion_vmd_path.as_deref() {
-                match parse_vmd_motion(motion_vmd_path) {
-                    Ok(vmd) => {
-                        pmx_log::info(format!(
-                            "VMD parsed: model_name='{}', bone_frames={}, morph_frames={}, duration={:.3}s",
-                            vmd.model_name,
-                            vmd.bone_frames.len(),
-                            vmd.morph_frames.len(),
-                            vmd.duration_secs()
-                        ));
-                        if !vmd.bone_frames.is_empty() || !vmd.morph_frames.is_empty() {
-                            let clip = vmd.to_clip_for_scene(&scene);
-                            pmx_log::info(format!(
-                                "VMD clip built: channels={}, duration={:.3}s",
-                                clip.channels.len(),
-                                clip.duration
-                            ));
-                            if clip.channels.is_empty() {
-                                pmx_log::warn(
-                                    "VMD clip has no matched channels; bone/morph names may not match this PMX.",
-                                );
-                            }
-                            scene.animations.push(clip);
-                        } else {
-                            pmx_log::warn(format!(
-                                "VMD {} contains no bone or morph frames.",
-                                motion_vmd_path.display()
-                            ));
-                        }
-                    }
-                    Err(err) => {
-                        pmx_log::error(format!(
-                            "failed to parse VMD {}: {err}",
-                            motion_vmd_path.display()
-                        ));
-                    }
-                }
-            }
-            pmx_log::info(format!(
-                "PMX+VMD scene animations={}",
-                scene.animations.len()
-            ));
-            scene
-        }
-    };
-    if let Some(stage_choice) = selection.stage_choice.as_ref() {
-        match stage_choice.status {
-            StageStatus::Ready => {
-                if let Some(stage_path) = stage_choice.render_path.as_deref() {
-                    match load_scene_file(stage_path) {
-                        Ok(mut stage_scene) => {
-                            apply_stage_transform(&mut stage_scene, stage_choice.transform);
-                            scene = merge_scenes(scene, stage_scene);
-                        }
-                        Err(err) => {
-                            eprintln!(
-                                "warning: failed to load stage {}: {err}",
-                                stage_path.display()
-                            );
-                        }
-                    }
-                }
-            }
-            StageStatus::NeedsConvert => {
-                let pmx = stage_choice
-                    .pmx_path
-                    .as_deref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| stage_choice.name.clone());
-                bail!(
-                    "선택한 스테이지는 PMX 변환이 필요합니다: {pmx}\nBlender + MMD Tools로 GLB 변환 후 다시 실행하세요."
-                );
-            }
-            StageStatus::Invalid => {
-                eprintln!(
-                    "warning: selected stage '{}' is invalid (no renderable assets). continuing without stage.",
-                    stage_choice.name
-                );
-            }
-        }
-    }
+    let mut scene = model::load_selected_model(&selection)?;
+    scene = stage::apply_stage_selection(scene, selection.stage_choice.as_ref())?;
     let animation_index = resolve_animation_index(&scene, args.anim.as_deref())?;
     if matches!(
         selection.branch,
@@ -317,229 +148,37 @@ pub(super) fn start(args: StartArgs) -> Result<()> {
             pmx_log::warn("no animation clip was selected after PMX+VMD import.");
         }
     }
-    let (sync_profile_context, sync_profile_entry) = resolve_sync_profile_for_assets(
+    let sync_result = sync::resolve_sync_and_audio(
+        &selection,
+        &scene,
+        animation_index,
         &sync_profile_defaults,
-        match selection.branch {
-            crate::runtime::start_ui::ModelBranch::Glb => RunSceneArg::Glb,
-            crate::runtime::start_ui::ModelBranch::PmxVmd => RunSceneArg::Pmx,
-        },
-        Some(match selection.branch {
-            crate::runtime::start_ui::ModelBranch::Glb => selection.glb_path.as_path(),
-            crate::runtime::start_ui::ModelBranch::PmxVmd => selection
-                .pmx_path
-                .as_deref()
-                .unwrap_or(selection.glb_path.as_path()),
-        }),
-        selection.music_path.as_deref(),
-        selection.camera_vmd_path.as_deref(),
-    );
-    let mut effective_sync = ResolvedSyncOptions {
-        sync_offset_ms: selection.sync_offset_ms,
-        sync_speed_mode: selection.sync_speed_mode,
-        sync_policy: selection.sync_policy,
-        sync_hard_snap_ms: selection.sync_hard_snap_ms,
-        sync_kp: selection.sync_kp,
-    };
-    if let Some(profile) = sync_profile_entry.as_ref() {
-        if args.sync_offset_ms.is_none() && selection.sync_offset_ms == sync_defaults.sync_offset_ms
-        {
-            effective_sync.sync_offset_ms = profile.sync_offset_ms;
-        }
-        if args.sync_speed_mode.is_none()
-            && selection.sync_speed_mode == sync_defaults.sync_speed_mode
-            && profile.sync_speed_mode.is_some()
-        {
-            effective_sync.sync_speed_mode = profile
-                .sync_speed_mode
-                .unwrap_or(sync_defaults.sync_speed_mode);
-        }
-        if args.sync_hard_snap_ms.is_none()
-            && selection.sync_hard_snap_ms == sync_defaults.sync_hard_snap_ms
-            && profile.sync_hard_snap_ms.is_some()
-        {
-            effective_sync.sync_hard_snap_ms = profile
-                .sync_hard_snap_ms
-                .unwrap_or(sync_defaults.sync_hard_snap_ms)
-                .clamp(10, 2_000);
-        }
-        if args.sync_kp.is_none()
-            && selection.sync_kp == sync_defaults.sync_kp
-            && profile.sync_kp.is_some()
-        {
-            effective_sync.sync_kp = profile
-                .sync_kp
-                .unwrap_or(sync_defaults.sync_kp)
-                .clamp(0.01, 1.0);
-        }
-    }
-    let clip_duration_secs = animation_index
-        .and_then(|idx| scene.animations.get(idx))
-        .map(|clip| clip.duration);
-    let audio_sync = prepare_audio_sync(
-        selection.music_path.as_deref(),
-        clip_duration_secs,
-        effective_sync.sync_speed_mode,
-    );
-    if selection.music_path.is_some() && audio_sync.is_none() {
-        eprintln!("warning: audio playback unavailable. continuing in silent mode.");
-    }
-    let mut config = render_config_from_start(
+        &sync_defaults,
         &args,
-        &ResolvedVisualOptions {
-            output_mode: selection.output_mode,
-            recover_color_auto: visual.recover_color_auto,
-            graphics_protocol: selection.graphics_protocol,
-            kitty_transport: visual.kitty_transport,
-            kitty_compression: visual.kitty_compression,
-            kitty_internal_res: visual.kitty_internal_res,
-            kitty_pipeline_mode: visual.kitty_pipeline_mode,
-            recover_strategy: visual.recover_strategy,
-            kitty_scale: visual.kitty_scale,
-            hq_target_fps: visual.hq_target_fps,
-            subject_exposure_only: visual.subject_exposure_only,
-            subject_target_height_ratio: visual.subject_target_height_ratio,
-            subject_target_width_ratio: visual.subject_target_width_ratio,
-            quality_auto_distance: visual.quality_auto_distance,
-            texture_mip_bias: visual.texture_mip_bias,
-            stage_as_sub_only: visual.stage_as_sub_only,
-            stage_role: visual.stage_role,
-            stage_luma_cap: visual.stage_luma_cap,
-            cell_aspect_mode: selection.cell_aspect_mode,
-            cell_aspect_trim: selection.cell_aspect_trim,
-            contrast_profile: selection.contrast_profile,
-            perf_profile: selection.perf_profile,
-            detail_profile: selection.detail_profile,
-            backend: selection.backend,
-            exposure_bias: visual.exposure_bias,
-            center_lock: selection.center_lock,
-            center_lock_mode: selection.center_lock_mode,
-            wasd_mode: selection.wasd_mode,
-            freefly_speed: selection.freefly_speed,
-            camera_look_speed: visual.camera_look_speed,
-            camera_mode: selection.camera_mode,
-            camera_align_preset: selection.camera_align_preset,
-            camera_unit_scale: selection.camera_unit_scale,
-            camera_vmd_fps: visual.camera_vmd_fps,
-            camera_vmd_path: selection.camera_vmd_path.clone(),
-            camera_focus: selection.camera_focus,
-            material_color: selection.material_color,
-            texture_sampling: selection.texture_sampling,
-            texture_v_origin: visual.texture_v_origin,
-            texture_sampler: visual.texture_sampler,
-            clarity_profile: selection.clarity_profile,
-            ansi_quantization: selection.ansi_quantization,
-            model_lift: selection.model_lift,
-            edge_accent_strength: selection.edge_accent_strength,
-            bg_suppression: visual.bg_suppression,
-            braille_aspect_compensation: selection.braille_aspect_compensation,
-            stage_level: selection.stage_level,
-            stage_reactive: selection.stage_reactive,
-            color_mode: Some(selection.color_mode),
-            ascii_force_color: visual.ascii_force_color,
-            braille_profile: selection.braille_profile,
-            theme_style: selection.theme_style,
-            audio_reactive: selection.audio_reactive,
-            cinematic_camera: selection.cinematic_camera,
-            reactive_gain: selection.reactive_gain,
-        },
     );
-    config.mode = selection.mode;
-    config.output_mode = selection.output_mode;
-    config.graphics_protocol = selection.graphics_protocol;
-    config.perf_profile = selection.perf_profile;
-    config.detail_profile = selection.detail_profile;
-    config.backend = selection.backend;
-    config.color_mode =
-        resolve_effective_color_mode(config.mode, selection.color_mode, config.ascii_force_color);
-    config.braille_profile = selection.braille_profile;
-    config.theme_style = selection.theme_style;
-    config.audio_reactive = selection.audio_reactive;
-    config.cinematic_camera = selection.cinematic_camera;
-    config.camera_focus = selection.camera_focus;
-    config.reactive_gain = selection.reactive_gain;
-    config.fps_cap = selection.fps_cap;
-    config.cell_aspect = selection.cell_aspect;
-    config.center_lock = selection.center_lock;
-    config.center_lock_mode = selection.center_lock_mode;
-    let wasd_mode = selection.wasd_mode;
-    let freefly_speed = selection.freefly_speed;
-    let effective_camera_mode =
-        resolve_effective_camera_mode(selection.camera_mode, selection.camera_vmd_path.is_some());
-    let camera_settings = RuntimeCameraSettings {
-        mode: effective_camera_mode,
-        align_preset: selection.camera_align_preset,
-        unit_scale: selection.camera_unit_scale,
-        vmd_fps: visual.camera_vmd_fps,
-        vmd_path: selection.camera_vmd_path.clone(),
-        look_speed: visual.camera_look_speed,
-    };
-    config.stage_level = selection.stage_level;
-    config.stage_reactive = selection.stage_reactive;
-    config.material_color = selection.material_color;
-    config.texture_sampling = selection.texture_sampling;
-    config.clarity_profile = selection.clarity_profile;
-    config.ansi_quantization = selection.ansi_quantization;
-    config.model_lift = selection.model_lift;
-    config.edge_accent_strength = selection.edge_accent_strength;
-    config.braille_aspect_compensation = selection.braille_aspect_compensation;
-    config.sync_policy = effective_sync.sync_policy;
-    config.sync_hard_snap_ms = effective_sync.sync_hard_snap_ms;
-    config.sync_kp = effective_sync.sync_kp;
-    apply_runtime_render_tuning(&mut config, &runtime_cfg);
+    let render_build = render_config::build_render_config(
+        &selection,
+        &args,
+        &visual,
+        &sync_result.effective_sync,
+        &runtime_cfg,
+        start_mode,
+    );
     run_scene_interactive(
         scene,
         animation_index,
         false,
-        config,
-        audio_sync,
-        effective_sync.sync_offset_ms,
+        render_build.config,
+        sync_result.audio_sync,
+        sync_result.effective_sync.sync_offset_ms,
         args.orbit_speed,
         args.orbit_radius,
         args.camera_height,
         args.look_at_y,
-        wasd_mode,
-        freefly_speed,
-        camera_settings,
+        render_build.wasd_mode,
+        render_build.freefly_speed,
+        render_build.camera_settings,
         pmx_settings,
-        sync_profile_context,
+        sync_result.sync_profile_context,
     )
-}
-
-fn apply_startup_font_config(runtime_cfg: &GasciiConfig) {
-    if runtime_cfg.font_preset_enabled {
-        run_ghostty_font_shortcut("0");
-    }
-    let steps = runtime_cfg.font_preset_steps;
-    if steps > 0 {
-        for _ in 0..steps {
-            run_ghostty_font_shortcut("=");
-        }
-    } else if steps < 0 {
-        for _ in 0..(-steps) {
-            run_ghostty_font_shortcut("-");
-        }
-    }
-}
-
-pub(super) fn run_ghostty_font_shortcut(key: &str) {
-    if !crate::terminal::TerminalProfile::detect().is_ghostty {
-        return;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let script = format!(
-            "tell application \"Ghostty\" to activate\ntell application \"System Events\" to keystroke \"{}\" using command down",
-            key
-        );
-        let _ = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = key;
-    }
 }

@@ -33,7 +33,10 @@ impl GpuRendererState {
         if self.renderer.is_none() {
             self.renderer = Some(GpuRenderer::new()?);
         }
-        Ok(self.renderer.as_mut().expect("renderer initialized above"))
+        // SAFETY: renderer was just initialized above if it was None.
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| GpuError::Render("renderer state inconsistent".to_string()))
     }
 }
 

@@ -72,7 +72,7 @@ impl GpuRenderer {
 
         if self.default_texture.is_none() {
             let default_tex = GpuTexture::placeholder(&self.ctx);
-            self.default_bind_group = Some(self.create_texture_bind_group(&default_tex));
+            self.default_bind_group = Some(self.create_texture_bind_group(&default_tex)?);
             self.default_texture = Some(default_tex);
         }
 

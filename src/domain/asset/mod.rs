@@ -1,3 +1,4 @@
-pub mod error;
-pub mod model;
-pub mod repository;
+pub mod entities;
+pub mod value_objects;
+pub mod repositories;
+pub mod errors;

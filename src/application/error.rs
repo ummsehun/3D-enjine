@@ -1,10 +1,10 @@
-use thiserror::Error;
 use crate::domain::{
-    asset::error::AssetError,
-    engine::error::EngineError,
-    render::error::RenderError,
-    runtime::error::RuntimeError,
+    asset::errors::asset_error::AssetError,
+    engine::errors::engine_error::EngineError,
+    render::errors::render_error::RenderError,
+    runtime::errors::runtime_error::RuntimeError,
 };
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ApplicationError {

@@ -1,5 +1,4 @@
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AssetId(pub u64);

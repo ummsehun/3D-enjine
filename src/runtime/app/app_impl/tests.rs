@@ -11,7 +11,6 @@ use crate::{
         interaction::update_camera_director,
         options::{default_color_mode_for_mode, resolve_effective_color_mode},
         scene_analysis::compute_scene_framing,
-        start_ui::{StageChoice, StageTransform},
         state::{
             CameraDirectorState, CenterLockState, ContinuousSyncState, DistanceClampGuard,
             ExposureAutoBoost, LOW_VIS_EXPOSURE_RECOVER_FRAMES, LOW_VIS_EXPOSURE_TRIGGER_FRAMES,
@@ -21,6 +20,7 @@ use crate::{
             is_terminal_size_unstable,
         },
     },
+    interfaces::tui::start_ui::{StageChoice, StageTransform},
     scene::{
         CameraControlMode, CameraFocusMode, CameraMode, CenterLockMode, CinematicCameraMode,
         ColorMode, PerfProfile, RenderConfig, RenderMode, SyncPolicy, SyncSpeedMode,

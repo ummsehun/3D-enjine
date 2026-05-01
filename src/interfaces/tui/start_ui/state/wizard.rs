@@ -10,7 +10,7 @@ use crate::scene::{
     SyncPolicy, SyncSpeedMode, TextureSamplingMode, ThemeStyle,
 };
 
-use crate::runtime::start_ui_helpers::{
+use crate::interfaces::tui::helpers::{
     breakpoint_for, closest_u32_index, compute_duration_fit_factor, inspect_motion_duration,
     MIN_HEIGHT, MIN_WIDTH, START_FPS_OPTIONS, SYNC_OFFSET_LIMIT_MS,
 };

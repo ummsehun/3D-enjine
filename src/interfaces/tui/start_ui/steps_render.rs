@@ -1,6 +1,6 @@
 use super::theme::start_ui_theme;
 use super::*;
-use crate::runtime::start_ui_helpers::fps_label;
+use crate::interfaces::tui::helpers::fps_label;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 
 pub(super) fn draw_render_options(

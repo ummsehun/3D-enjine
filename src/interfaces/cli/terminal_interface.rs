@@ -15,7 +15,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use crate::{
     renderer::FrameBuffers,
     runtime::graphics_proto::{GraphicsPresentOptions, write_graphics_frame},
-    runtime::terminal_caps::ensure_tty,
+    interfaces::cli::terminal_caps::ensure_tty,
     runtime::terminal_diff::{build_diff_segments, quantize_rgb},
     scene::{
         AnsiQuantization, GraphicsProtocol, KittyCompression, KittyPipelineMode, KittyTransport,
@@ -23,7 +23,7 @@ use crate::{
     },
 };
 
-pub use crate::runtime::terminal_caps::TerminalProfile;
+pub use crate::interfaces::cli::terminal_caps::TerminalProfile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentMode {

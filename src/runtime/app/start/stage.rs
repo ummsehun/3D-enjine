@@ -3,8 +3,8 @@ use anyhow::Result;
 use crate::{
     runtime::{
         asset_discovery::{apply_stage_transform, load_scene_file, merge_scenes},
-        start_ui::{StageChoice, StageStatus},
     },
+    interfaces::tui::start_ui::{StageChoice, StageStatus},
     scene::SceneCpu,
 };
 

@@ -27,7 +27,7 @@ use crate::{
     scene::{
         CameraControlMode, RenderConfig, RenderOutputMode, SceneCpu, StageRole, resolve_cell_aspect,
     },
-    terminal::{PresentMode, TerminalProfile, TerminalSession},
+    interfaces::cli::terminal_interface::{PresentMode, TerminalProfile, TerminalSession},
 };
 
 use super::helpers::{detect_terminal_cell_aspect, resize_runtime_frame, validated_terminal_size};

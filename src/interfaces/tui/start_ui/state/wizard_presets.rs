@@ -23,7 +23,7 @@ use super::converters::{
     render_detail_mode_to_text, sync_policy_to_text, sync_speed_mode_to_text,
     texture_sampling_to_text, theme_style_to_text, wasd_mode_to_text,
 };
-use crate::runtime::start_ui_helpers::{closest_u32_index, START_FPS_OPTIONS, SYNC_OFFSET_LIMIT_MS};
+use crate::interfaces::tui::helpers::{closest_u32_index, START_FPS_OPTIONS, SYNC_OFFSET_LIMIT_MS};
 
 impl StartWizardState {
     pub(crate) fn reload_preset_names(&mut self) {

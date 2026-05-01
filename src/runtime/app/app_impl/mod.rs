@@ -28,9 +28,9 @@ use crate::{
         },
         preprocess::run_preprocess,
         render_loop::run_scene_interactive,
-        start_ui::StageStatus,
         state::{RuntimeCameraSettings, resolve_runtime_backend},
     },
+    interfaces::tui::start_ui::StageStatus,
     scene::{CellAspectMode, resolve_cell_aspect},
 };
 

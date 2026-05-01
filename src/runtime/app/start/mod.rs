@@ -16,8 +16,8 @@ use crate::{
         },
         pmx_log,
         render_loop::run_scene_interactive,
-        start_ui::{StartWizardDefaults, run_start_wizard},
     },
+    interfaces::tui::start_ui::{StartWizardDefaults, run_start_wizard},
     scene::RenderMode,
 };
 
@@ -141,7 +141,7 @@ pub(super) fn start(args: StartArgs) -> Result<()> {
     let animation_index = resolve_animation_index(&scene, args.anim.as_deref())?;
     if matches!(
         selection.branch,
-        crate::runtime::start_ui::ModelBranch::PmxVmd
+        crate::interfaces::tui::start_ui::ModelBranch::PmxVmd
     ) {
         pmx_log::info(format!("resolved animation_index={animation_index:?}"));
         if animation_index.is_none() {

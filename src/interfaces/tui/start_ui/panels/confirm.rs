@@ -8,7 +8,7 @@ use super::super::types::StageStatus;
 use super::super::tr;
 use super::super::ModelBranch;
 use crate::runtime::config::UiLanguage;
-use crate::runtime::start_ui_helpers::{duration_label, fps_label};
+use crate::interfaces::tui::helpers::{duration_label, fps_label};
 use crate::scene::RenderBackend;
 
 pub fn draw_confirm_panel(

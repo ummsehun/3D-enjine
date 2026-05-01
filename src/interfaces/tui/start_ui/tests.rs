@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::start_ui_helpers::{breakpoint_for, QUICK_RENDER_FIELD_COUNT};
+use crate::interfaces::tui::helpers::{breakpoint_for, QUICK_RENDER_FIELD_COUNT};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
 

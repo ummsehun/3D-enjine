@@ -1,6 +1,6 @@
 use std::{fs, path::Path, path::PathBuf};
 
-use crate::runtime::start_ui_helpers::format_mib;
+use crate::interfaces::tui::helpers::format_mib;
 
 #[derive(Debug, Clone)]
 pub(crate) struct StartEntry {

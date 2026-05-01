@@ -26,13 +26,13 @@ use crossterm::{
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear as WidgetClear, Paragraph};
 
-use crate::runtime::{
-    config::{UiLanguage, preset::PresetStore},
-    start_ui_helpers::{
+use crate::{
+    runtime::config::{UiLanguage, preset::PresetStore},
+    interfaces::tui::helpers::{
         QUICK_RENDER_FIELD_COUNT, RATATUI_SAFE_MAX_CELLS, RENDER_FIELD_COUNT, START_FPS_OPTIONS,
         SYNC_OFFSET_LIMIT_MS, SYNC_OFFSET_STEP_MS, clamp_ratatui_area, cycle_index, tr,
     },
-    terminal::{RatatuiSession, TerminalProfile},
+    interfaces::cli::terminal_interface::{RatatuiSession, TerminalProfile},
 };
 
 use state::{PresetPromptState, StartEntry, StartWizardAction, StartWizardState};

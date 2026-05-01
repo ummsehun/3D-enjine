@@ -4,7 +4,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use super::super::state::StartWizardState;
 use super::super::tr;
 use crate::runtime::config::UiLanguage;
-use crate::runtime::start_ui_helpers::{MIN_HEIGHT, MIN_WIDTH};
+use crate::interfaces::tui::helpers::{MIN_HEIGHT, MIN_WIDTH};
 
 pub fn draw_min_size_screen(
     frame: &mut Frame,

@@ -6,9 +6,9 @@ use crate::{
             ResolvedSyncOptions, ResolvedSyncProfileOptions, RuntimeSyncProfileContext,
             resolve_sync_profile_for_assets,
         },
-        start_ui::{ModelBranch, StartSelection},
         sync_profile::SyncProfileEntry,
     },
+    interfaces::tui::start_ui::{ModelBranch, StartSelection},
     scene::SceneCpu,
 };
 

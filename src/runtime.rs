@@ -7,7 +7,6 @@ pub mod platform_io;
 pub mod rendering;
 pub mod state;
 pub mod sync;
-pub mod terminal;
 
 #[path = "runtime/app/inspect/mod.rs"]
 pub(crate) mod app_inspect;
@@ -30,23 +29,14 @@ pub(crate) mod interaction_camera;
 pub(crate) mod options;
 #[path = "runtime/config/options_visual/mod.rs"]
 pub(crate) mod options_visual;
-#[path = "runtime/platform_io/pmx_log/mod.rs"]
-pub(crate) mod pmx_log;
+pub use crate::shared::pmx_log;
 #[path = "runtime/assets/preprocess/mod.rs"]
 pub(crate) mod preprocess;
-#[path = "runtime/rendering/preview/mod.rs"]
-pub(crate) mod preview;
 #[path = "runtime/rendering/loop_runtime/mod.rs"]
 pub(crate) mod render_loop;
 #[path = "runtime/assets/analysis/mod.rs"]
 pub(crate) mod scene_analysis;
-#[path = "runtime/interaction/start_ui/mod.rs"]
-pub(crate) mod start_ui;
-#[path = "runtime/interaction/start_ui_helpers/mod.rs"]
-pub(crate) mod start_ui_helpers;
 #[path = "runtime/sync/profile/mod.rs"]
 pub(crate) mod sync_profile;
-#[path = "runtime/platform_io/terminal_caps/mod.rs"]
-pub(crate) mod terminal_caps;
 #[path = "runtime/platform_io/terminal_diff/mod.rs"]
 pub(crate) mod terminal_diff;

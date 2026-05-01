@@ -3,7 +3,7 @@ use std::time::Instant;
 use crate::{
     runtime::options::color_path_label,
     scene::{RenderConfig, RenderOutputMode},
-    terminal::PresentMode,
+    interfaces::cli::terminal_interface::PresentMode,
 };
 
 use super::bootstrap::BootstrapState;

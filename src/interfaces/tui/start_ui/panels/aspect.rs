@@ -4,7 +4,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use super::super::state::StartWizardState;
 use super::super::tr;
 use crate::runtime::config::UiLanguage;
-use crate::runtime::start_ui_helpers::aspect_preview_ascii;
+use crate::interfaces::tui::helpers::aspect_preview_ascii;
 
 pub fn draw_aspect_calibration(
     frame: &mut Frame,

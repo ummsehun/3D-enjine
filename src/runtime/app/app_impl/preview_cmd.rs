@@ -5,11 +5,11 @@ use crate::{
     runtime::{
         asset_discovery::{discover_camera_vmds, resolve_camera_vmd_choice},
         options::RuntimeSyncProfileContext,
-        preview::run_preview_server,
         sync_profile::{
             SyncProfileMode, SyncProfileStore, build_profile_key, default_profile_store_path,
         },
     },
+    interfaces::preview::run_preview_server,
 };
 
 use super::config::load_runtime_config;

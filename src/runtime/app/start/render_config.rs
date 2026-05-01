@@ -23,7 +23,7 @@ pub(super) struct RenderBuild {
 /// Build the full render configuration from the wizard selection.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_render_config(
-    selection: &crate::runtime::start_ui::StartSelection,
+    selection: &crate::interfaces::tui::start_ui::StartSelection,
     args: &StartArgs,
     visual: &ResolvedVisualOptions,
     effective_sync: &ResolvedSyncOptions,

@@ -1,4 +1,4 @@
-use crate::runtime::start_ui_helpers::{
+use crate::interfaces::tui::helpers::{
     detect_terminal_cell_aspect, inspect_audio_duration, inspect_clip_duration,
 };
 

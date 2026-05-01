@@ -10,7 +10,7 @@ use crate::{
         KittyInternalResPreset, RenderConfig, RenderOutputMode, estimate_cell_aspect_from_window,
         kitty_internal_resolution,
     },
-    terminal::TerminalSession,
+    interfaces::cli::terminal_interface::TerminalSession,
 };
 
 pub(crate) fn set_runtime_panic_state_proxy(line: String) {

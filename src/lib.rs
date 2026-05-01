@@ -10,8 +10,11 @@ pub mod domain;
 pub mod application;
 pub mod infrastructure;
 
+// Interfaces 계층 (Phase 5)
+pub mod interfaces;
+
 // 기존 re-exports (유지)
 pub use assets::loader;
 pub use engine::{animation, math, pipeline, scene};
 pub use render::renderer;
-pub use runtime::{app, cli, terminal};
+pub use runtime::{app, cli};

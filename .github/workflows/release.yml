@@ -54,7 +54,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
 
       - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --features gpu
 
       - name: Create release package
         shell: bash

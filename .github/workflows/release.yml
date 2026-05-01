@@ -29,19 +29,16 @@ jobs:
             target: aarch64-apple-darwin
             artifact_name: terminal-miku3d-macos-arm64
             binary: terminal-miku3d
-            launcher: start.sh
 
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: terminal-miku3d-windows-x64
             binary: terminal-miku3d.exe
-            launcher: start.bat
 
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: terminal-miku3d-linux-x64
             binary: terminal-miku3d
-            launcher: start.sh
 
     steps:
       - uses: actions/checkout@v4
@@ -66,54 +63,18 @@ jobs:
           mkdir -p "$PKG_DIR"/assets/{glb,stage,pmx,vmd,camera,music,sync}
           mkdir -p "$PKG_DIR/bin"
 
-          # Copy binary
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$PKG_DIR/bin/"
-          else
-            cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$PKG_DIR/bin/"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$PKG_DIR/bin/"
+
+          if [ "${{ matrix.os }}" != "windows-latest" ]; then
             chmod +x "$PKG_DIR/bin/${{ matrix.binary }}"
           fi
 
-          # Copy config
           cp Gascii.config "$PKG_DIR/" 2>/dev/null || true
 
-          # Create launcher
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cat > "$PKG_DIR/start.bat" << 'BATEOF'
-            @echo off
-            setlocal enabledelayedexpansion
-            cd /d "%~dp0"
-            chcp 65001 >nul 2>&1
-            if not exist "assets\glb" mkdir "assets\glb"
-            if not exist "assets\stage" mkdir "assets\stage"
-            if not exist "assets\pmx" mkdir "assets\pmx"
-            if not exist "assets\vmd" mkdir "assets\vmd"
-            if not exist "assets\camera" mkdir "assets\camera"
-            if not exist "assets\music" mkdir "assets\music"
-            if not exist "assets\sync" mkdir "assets\sync"
-            if not exist "bin\terminal-miku3d.exe" (
-              echo Error: Binary not found at bin\terminal-miku3d.exe
-              pause
-              exit /b 1
-            )
-            bin\terminal-miku3d.exe start %*
-            BATEOF
+            cp scripts/launcher/start.bat "$PKG_DIR/"
           else
-            cat > "$PKG_DIR/start.sh" << 'SHEOF'
-            #!/usr/bin/env bash
-            set -euo pipefail
-            SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-            BINARY="${SCRIPT_DIR}/bin/terminal-miku3d"
-            if [ ! -f "$BINARY" ]; then
-              echo "Error: Binary not found at ${BINARY}"
-              exit 1
-            fi
-            chmod +x "$BINARY"
-            mkdir -p "${SCRIPT_DIR}/assets"/{glb,stage,pmx,vmd,camera,music,sync}
-            export LC_ALL="${LC_ALL:-en_US.UTF-8}"
-            export LANG="${LANG:-en_US.UTF-8}"
-            exec "$BINARY" start "$@"
-            SHEOF
+            cp scripts/launcher/start.sh "$PKG_DIR/"
             chmod +x "$PKG_DIR/start.sh"
           fi
 
